@@ -199,8 +199,8 @@ export default function App() {
       <main className="main-content">
         <h1>Connect Your Platforms</h1>
         <p className="subtitle">
-          Authorize each social platform so <strong>Proof-of-Work</strong> can
-          publish job photos automatically for{' '}
+          Connect each platform so <strong>Scale Small AI</strong> can
+          create and publish content on behalf of{' '}
           <strong>{user.business_name}</strong>.
         </p>
 
