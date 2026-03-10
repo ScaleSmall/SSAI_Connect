@@ -148,6 +148,8 @@ h1 { font-weight: 800; font-size: 32px; color: var(--slate-50); line-height: 1.2
 .ic-li { background: #0a66c2; color: #fff; }
 .ic-gbp { background: #4285f4; color: #fff; }
 .ic-tt { background: #010101; color: #fe2c55; border: 1px solid rgba(51, 65, 85, 0.5); }
+.ic-web { background: #6366f1; color: #fff; }
+.ic-cc { background: #f97316; color: #fff; }
 
 /* ═══════════════ STATES ═══════════════ */
 .loading { text-align: center; padding: 100px 0; color: var(--slate-400); }

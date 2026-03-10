@@ -67,7 +67,23 @@ export default function App() {
       const res = await fetch(`${OAUTH_STATUS_URL}?client_id=${user.n8n_client_id}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setPlatforms(data.platforms || []);
+      const raw = data.platforms || [];
+
+      // Derive Instagram status from Facebook entry
+      const fb = raw.find((p) => p.platform === 'facebook');
+      const hasIg = fb?.details?.ig_user_id;
+      if (!raw.find((p) => p.platform === 'instagram')) {
+        raw.push({
+          platform: 'instagram',
+          connected: !!hasIg,
+          enabled: fb?.enabled ?? false,
+          is_expired: fb?.is_expired ?? false,
+          token_expires_at: fb?.token_expires_at || null,
+          details: hasIg ? { ig_user_id: fb.details.ig_user_id } : {},
+        });
+      }
+
+      setPlatforms(raw);
     } catch (err) {
       setError(`Failed to load platforms: ${err.message}`);
     }
