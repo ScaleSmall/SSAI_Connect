@@ -35,7 +35,7 @@ export const LinkedInIcon = () => (
 
 export const GoogleBusinessIcon = () => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 11.5a2.5 2.5 0 110 5 2.5 2.5 0 010-5zm0-1.5a4 4 0 100 8 4 4 0 000-8zm0-6C5.373 4 0 9.373 0 16h2c0-5.523 4.477-10 10-10s10 4.477 10 10h2c0-6.627-5.373-12-12-12zm0 4a8 8 0 00-8 8h2a6 6 0 0112 0h2a8 8 0 00-8-8z"/>
+    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 110-5 2.5 2.5 0 010 5z"/>
   </svg>
 );
 
