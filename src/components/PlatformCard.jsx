@@ -80,13 +80,15 @@ export default function PlatformCard({ platform, clientId, index }) {
     button = <span className="btn btn-disabled">Disabled</span>;
   } else {
     detail = meta.note;
-    detailClass = 'off';
     if (isWebsite) {
+      detailClass = 'err';
       button = <button className="btn btn-connect" onClick={() => setShowEmbed(!showEmbed)}>{showEmbed ? '▾ Hide' : 'Get Embed Code'}</button>;
     } else if (meta.noOAuth) {
+      detailClass = meta.derived ? 'off' : 'err';
       const label = meta.derived ? 'Connect Facebook first' : 'Setup required';
       button = <span className="btn btn-disabled">{label}</span>;
     } else {
+      detailClass = 'err';
       button = <a href={connectUrl} className="btn btn-connect">Connect</a>;
     }
   }
