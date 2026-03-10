@@ -46,9 +46,13 @@ export default function PlatformCard({ platform, clientId, index }) {
   } else {
     detail = meta.note;
     detailClass = 'off';
-    button = meta.noOAuth
-      ? <span className="btn btn-disabled">Connect Facebook first</span>
-      : <a href={connectUrl} className="btn btn-connect">Connect</a>;
+    if (meta.noOAuth) {
+      const label = meta.derived ? 'Connect Facebook first'
+        : 'Manual setup required';
+      button = <span className="btn btn-disabled">{label}</span>;
+    } else {
+      button = <a href={connectUrl} className="btn btn-connect">Connect</a>;
+    }
   }
 
   return (

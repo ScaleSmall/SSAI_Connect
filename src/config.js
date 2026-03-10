@@ -14,7 +14,7 @@ export const PLATFORM_META = {
   linkedin:  { name: 'LinkedIn',        icon: 'in', iconClass: 'ic-li',  note: 'Company page posting' },
   gbp:       { name: 'Google Business', icon: 'G',  iconClass: 'ic-gbp', note: 'Local posts + photo gallery' },
   tiktok:    { name: 'TikTok',          icon: '♪',  iconClass: 'ic-tt',  note: 'Short-form video posting' },
-  website:   { name: 'Website Gallery', icon: '🌐', iconClass: 'ic-web', note: 'Auto-publish job photos to your site' },
+  website:   { name: 'Website Gallery', icon: '🌐', iconClass: 'ic-web', note: 'Auto-publish job photos to your site', noOAuth: true },
   reddit:    { name: 'Reddit',          icon: 'R',  iconClass: 'ic-x',   hidden: true },
   companycam:{ name: 'CompanyCam',      icon: '📸', iconClass: 'ic-cc',  hidden: true },
 };
