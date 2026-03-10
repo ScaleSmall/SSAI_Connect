@@ -63,11 +63,16 @@ export default function PlatformCard({ platform, clientId, index }) {
   let detail, detailClass, button;
 
   if (platform.connected && !platform.is_expired) {
-    detail = detailStr || timeStr(platform.token_expires_at) || 'Connected';
-    detailClass = 'ok';
-    button = isWebsite
-      ? <button className="btn btn-ok" onClick={() => setShowEmbed(!showEmbed)}>{showEmbed ? '▾ Hide Code' : '✓ Get Embed Code'}</button>
-      : <span className="btn btn-ok">✓ Connected</span>;
+    if (isWebsite) {
+      const domain = details.domain || 'your site';
+      detail = `Widget active on ${domain}`;
+      detailClass = 'ok';
+      button = <button className="btn btn-ok" onClick={() => setShowEmbed(!showEmbed)}>{showEmbed ? '▾ Hide Code' : '✓ Connected'}</button>;
+    } else {
+      detail = detailStr || timeStr(platform.token_expires_at) || 'Connected';
+      detailClass = 'ok';
+      button = <span className="btn btn-ok">✓ Connected</span>;
+    }
   } else if (platform.is_expired) {
     detail = 'Token expired — reconnect to fix';
     detailClass = 'warn';
@@ -81,6 +86,7 @@ export default function PlatformCard({ platform, clientId, index }) {
   } else {
     detail = meta.note;
     if (isWebsite) {
+      detail = 'Paste embed code on your site to connect';
       detailClass = 'err';
       button = <button className="btn btn-connect" onClick={() => setShowEmbed(!showEmbed)}>{showEmbed ? '▾ Hide' : 'Get Embed Code'}</button>;
     } else if (meta.noOAuth) {
