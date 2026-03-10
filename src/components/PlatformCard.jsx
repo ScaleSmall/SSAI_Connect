@@ -1,5 +1,6 @@
 import React from 'react';
 import { PLATFORM_META } from '../config';
+import PlatformIcon from './PlatformIcon';
 
 function timeStr(exp) {
   if (!exp) return '';
@@ -57,7 +58,9 @@ export default function PlatformCard({ platform, clientId, index }) {
 
   return (
     <div className="p-card" style={{ animation: `fadeUp 0.45s ease ${index * 0.04}s both` }}>
-      <div className={`p-icon ${meta.iconClass}`}>{meta.icon}</div>
+      <div className={`p-icon ${meta.iconClass}`}>
+        <PlatformIcon platform={platform.platform} />
+      </div>
       <div className="p-info">
         <div className="p-name">{meta.name}</div>
         <div className={`p-detail ${detailClass}`}>{detail}</div>
