@@ -218,3 +218,28 @@ button.btn-ok:hover { background: rgba(34, 197, 94, 0.15); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toastIn { from { transform: translateX(-50%) translateY(16px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
+
+/* Connector Cards */
+.card { background: #0d1b2a; border: 1px solid #1b2d45; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.75rem; transition: border-color 0.2s; }
+.card-connected { border-color: rgba(22,163,74,0.2); }
+.card-action { border-color: rgba(234,179,8,0.2); }
+.card-disconnected { border-color: #1b2d45; opacity: 0.7; }
+.card-header { display: flex; align-items: center; gap: 0.75rem; }
+.card-icon { font-size: 1.5rem; width: 2.5rem; text-align: center; flex-shrink: 0; }
+.card-title h3 { margin: 0; font-size: 1rem; color: #e2e8f0; }
+.card-desc { margin: 0.2rem 0 0; font-size: 0.8rem; color: #64748b; }
+.badge { margin-left: auto; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; }
+.badge-ok { background: rgba(22,163,74,0.13); color: #4ade80; }
+.badge-warn { background: rgba(234,179,8,0.13); color: #fbbf24; }
+.badge-off { background: rgba(51,51,51,0.27); color: #94a3b8; }
+.card-body { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #1b2d45; }
+.card-stat { margin: 0.25rem 0; font-size: 0.8rem; color: #94a3b8; }
+.card-error { color: #f87171; font-size: 0.8rem; margin-top: 0.5rem; }
+.setup-steps { margin: 0.5rem 0; padding-left: 1.25rem; font-size: 0.8rem; color: #94a3b8; }
+.setup-steps li { margin-bottom: 0.25rem; }
+.token-input-row { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.input-token { flex: 1; background: #0a1628; border: 1px solid #1b2d45; border-radius: 8px; padding: 0.5rem 0.75rem; color: #e2e8f0; font-size: 0.85rem; }
+.input-token:focus { outline: none; border-color: #3b82f6; }
+.btn-disconnect { background: transparent; border: 1px solid rgba(220,38,38,0.27); color: #f87171; cursor: pointer; border-radius: 8px; }
+.btn-disconnect:hover { background: rgba(220,38,38,0.13); }
+.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
