@@ -1,97 +1,83 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from './supabase';
-import { OAUTH_STATUS_URL, PLATFORM_ORDER, PLATFORM_META } from './config';
+import { OAUTH_STATUS_URL, CONNECTOR_STATUS_URL, PLATFORM_ORDER, PLATFORM_META } from './config';
 import Header from './components/Header';
 import LoginForm from './components/LoginForm';
 import StatusBar from './components/StatusBar';
 import PlatformCard from './components/PlatformCard';
+import ConnectorCard from './components/ConnectorCard';
 import Toast from './components/Toast';
 import Footer from './components/Footer';
 
 export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [user, setUser] = useState(null);       // from public.users table
+  const [user, setUser] = useState(null);
   const [platforms, setPlatforms] = useState(null);
+  const [connectors, setConnectors] = useState(null);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
 
-  // ── Auth listener ──
+  // Auth listener
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setAuthLoading(false);
     });
-
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (!session) {
-        setUser(null);
-        setPlatforms(null);
-      }
+      if (!session) { setUser(null); setPlatforms(null); setConnectors(null); }
     });
-
     return () => subscription.unsubscribe();
   }, []);
 
-  // ── Fetch user profile (to get n8n_client_id) ──
+  // Fetch user profile
   useEffect(() => {
     if (!session?.user?.id) return;
-
     async function fetchUser() {
       const { data, error: err } = await supabase
         .from('users')
         .select('id, email, business_name, n8n_client_id')
         .eq('id', session.user.id)
         .single();
-
-      if (err || !data) {
-        setError('Could not find your account. Contact support.');
-        return;
-      }
-      if (!data.n8n_client_id) {
-        setError('No client ID linked to your account yet. Complete onboarding first.');
-        return;
-      }
+      if (err || !data) { setError('Could not find your account. Contact support.'); return; }
+      if (!data.n8n_client_id) { setError('No client ID linked to your account yet. Complete onboarding first.'); return; }
       setUser(data);
       setError(null);
     }
-
     fetchUser();
   }, [session]);
 
-  // ── Fetch platform status once we have client_id ──
+  // Fetch platform status
   const fetchPlatforms = useCallback(async () => {
     if (!user?.n8n_client_id) return;
     try {
       const res = await fetch(`${OAUTH_STATUS_URL}?client_id=${user.n8n_client_id}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const raw = data.platforms || [];
-
-      // Derive Instagram status from Facebook entry
-      const fb = raw.find((p) => p.platform === 'facebook');
-      const hasIg = fb?.details?.ig_user_id;
-      if (!raw.find((p) => p.platform === 'instagram')) {
-        raw.push({
-          platform: 'instagram',
-          connected: !!hasIg,
-          enabled: fb?.enabled ?? false,
-          is_expired: fb?.is_expired ?? false,
-          token_expires_at: fb?.token_expires_at || null,
-          details: hasIg ? { ig_user_id: fb.details.ig_user_id } : {},
-        });
-      }
-
-      setPlatforms(raw);
+      setPlatforms(data.platforms || []);
     } catch (err) {
       setError(`Failed to load platforms: ${err.message}`);
     }
   }, [user]);
 
-  useEffect(() => { fetchPlatforms(); }, [fetchPlatforms]);
+  // Fetch connector status (separate from platforms)
+  const fetchConnectors = useCallback(async () => {
+    if (!user?.n8n_client_id) return;
+    try {
+      const res = await fetch(`${CONNECTOR_STATUS_URL}?client_id=${user.n8n_client_id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setConnectors(data.my_connectors || []);
+    } catch (err) {
+      console.error('Failed to load connectors:', err);
+      setConnectors([]);
+    }
+  }, [user]);
 
-  // ── OAuth return toast ──
+  useEffect(() => { fetchPlatforms(); fetchConnectors(); }, [fetchPlatforms, fetchConnectors]);
+
+  // OAuth return toast
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('status') === 'success') {
@@ -100,20 +86,16 @@ export default function App() {
       const url = new URL(window.location);
       ['status', 'platform', 'warnings'].forEach((k) => url.searchParams.delete(k));
       window.history.replaceState({}, '', url);
-      // Refresh platform list
-      setTimeout(() => fetchPlatforms(), 500);
+      setTimeout(() => { fetchPlatforms(); fetchConnectors(); }, 500);
     }
-  }, [fetchPlatforms]);
+  }, [fetchPlatforms, fetchConnectors]);
 
-  // ── Logout ──
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    setSession(null);
-    setUser(null);
-    setPlatforms(null);
+    setSession(null); setUser(null); setPlatforms(null); setConnectors(null);
   };
 
-  // ── Platform counts ──
+  // Platform counts
   const counts = useMemo(() => {
     if (!platforms) return { connected: 0, expired: 0, needsSetup: 0, disabled: 0 };
     let connected = 0, expired = 0, needsSetup = 0, disabled = 0;
@@ -128,71 +110,40 @@ export default function App() {
     return { connected, expired, needsSetup, disabled };
   }, [platforms]);
 
-  // ── Sorted platforms: not connected first, then expired, then connected ──
+  // Sorted platforms
   const sortedPlatforms = useMemo(() => {
     if (!platforms) return [];
     const visible = PLATFORM_ORDER
       .map((pid) => platforms.find((p) => p.platform === pid))
       .filter((p) => p && PLATFORM_META[p.platform] && !PLATFORM_META[p.platform].hidden);
-
     return visible.sort((a, b) => {
       const order = (p) => {
-        if (!p.connected && !p.is_expired && p.enabled) return 0; // needs setup
-        if (p.is_expired) return 1;                                 // expired
-        if (!p.enabled) return 3;                                   // disabled
-        return 2;                                                    // connected
+        if (!p.connected && !p.is_expired && p.enabled) return 0;
+        if (p.is_expired) return 1;
+        if (!p.enabled) return 3;
+        return 2;
       };
       return order(a) - order(b);
     });
   }, [platforms]);
 
-  // ── Loading auth ──
   if (authLoading) {
-    return (
-      <>
-        <Header />
-        <main className="main-content">
-          <div className="loading"><div className="spinner" />Loading...</div>
-        </main>
-        <Footer />
-      </>
-    );
+    return (<><Header /><main className="main-content"><div className="loading"><div className="spinner" />Loading...</div></main><Footer /></>);
   }
 
-  // ── Not logged in ──
   if (!session) {
-    return (
-      <>
-        <Header />
-        <main className="main-content">
-          <LoginForm />
-        </main>
-        <Footer />
-      </>
-    );
+    return (<><Header /><main className="main-content"><LoginForm /></main><Footer /></>);
   }
 
-  // ── Logged in but waiting for user profile / platforms ──
   if (!user || !platforms) {
     return (
-      <>
-        <Header user={user || { email: session.user.email }} onLogout={handleLogout} />
+      <><Header user={user || { email: session.user.email }} onLogout={handleLogout} />
         <main className="main-content">
-          {error ? (
-            <>
-              <h1>Connect Your Platforms</h1>
-              <div className="error-box">{error}</div>
-            </>
-          ) : (
-            <div className="loading"><div className="spinner" />Loading platform status…</div>
-          )}
-        </main>
-        <Footer />
-      </>
+          {error ? (<><h1>Connect Your Platforms</h1><div className="error-box">{error}</div></>) : (<div className="loading"><div className="spinner" />Loading platform status…</div>)}
+        </main><Footer /></>
     );
   }
 
-  // ── Dashboard ──
   return (
     <>
       <Header user={user} onLogout={handleLogout} />
@@ -209,14 +160,23 @@ export default function App() {
         <div className="section-label">Platforms</div>
         <div className="platforms">
           {sortedPlatforms.map((p, i) => (
-            <PlatformCard
-              key={p.platform}
-              platform={p}
-              clientId={user.n8n_client_id}
-              index={i}
-            />
+            <PlatformCard key={p.platform} platform={p} clientId={user.n8n_client_id} index={i} />
           ))}
         </div>
+
+        {connectors && connectors.length > 0 && (
+          <>
+            <div className="section-label" style={{marginTop: '2rem'}}>Photo Connectors</div>
+            <p className="subtitle" style={{marginBottom: '1rem'}}>
+              Connect your photo source so we can automatically import job site photos.
+            </p>
+            <div className="platforms">
+              {connectors.map((c) => (
+                <ConnectorCard key={c.connector_type} connector={c} clientId={user.n8n_client_id} onRefresh={fetchConnectors} />
+              ))}
+            </div>
+          </>
+        )}
       </main>
 
       <Footer />
