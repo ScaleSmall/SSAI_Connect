@@ -1,186 +1,141 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import { supabase } from './supabase';
-import { OAUTH_STATUS_URL, CONNECTOR_STATUS_URL, PLATFORM_ORDER, PLATFORM_META } from './config';
-import Header from './components/Header';
 import LoginForm from './components/LoginForm';
-import StatusBar from './components/StatusBar';
-import PlatformCard from './components/PlatformCard';
-import ConnectorCard from './components/ConnectorCard';
 import Toast from './components/Toast';
-import Footer from './components/Footer';
+import ConnectionsPage from './pages/ConnectionsPage';
+import EntityDashboard from './pages/entity/EntityDashboard';
+import EntityCitations from './pages/entity/EntityCitations';
+import EntityProfiles from './pages/entity/EntityProfiles';
+import EntityIssues from './pages/entity/EntityIssues';
+import EntityAlerts from './pages/entity/EntityAlerts';
+import EntityScans from './pages/entity/EntityScans';
+import EntityAdmin from './pages/entity/EntityAdmin';
+import EntityOnboarding from './pages/entity/EntityOnboarding';
+
+const NAV = [
+  { section: 'Services' },
+  { to: '/connections', label: 'Connections', icon: '⚡' },
+  { section: 'Local Entity' },
+  { to: '/entity', label: 'Overview', icon: '◉' },
+  { to: '/entity/citations', label: 'Citations', icon: '◎' },
+  { to: '/entity/profiles', label: 'Profiles', icon: '◈' },
+  { to: '/entity/issues', label: 'Issues', icon: '▲' },
+  { to: '/entity/alerts', label: 'Alerts', icon: '◆' },
+  { section: 'Admin', adminOnly: true },
+  { to: '/entity/scans', label: 'Scans', icon: '↻', adminOnly: true },
+  { to: '/entity/onboarding', label: 'Onboarding', icon: '＋', adminOnly: true },
+  { to: '/entity/admin', label: 'System Health', icon: '⚙', adminOnly: true },
+];
 
 export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [user, setUser] = useState(null);
-  const [platforms, setPlatforms] = useState(null);
-  const [connectors, setConnectors] = useState(null);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  const location = useLocation();
 
-  // Auth listener
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setAuthLoading(false);
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (!session) { setUser(null); setPlatforms(null); setConnectors(null); }
-    });
+    supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setAuthLoading(false); });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => { setSession(s); if (!s) setUser(null); });
     return () => subscription.unsubscribe();
   }, []);
 
-  // Fetch user profile
   useEffect(() => {
     if (!session?.user?.id) return;
-    async function fetchUser() {
-      const { data, error: err } = await supabase
-        .from('users')
-        .select('id, email, business_name, n8n_client_id')
-        .eq('id', session.user.id)
-        .single();
-      if (err || !data) { setError('Could not find your account. Contact support.'); return; }
-      if (!data.n8n_client_id) { setError('No client ID linked to your account yet. Complete onboarding first.'); return; }
-      setUser(data);
-      setError(null);
-    }
-    fetchUser();
+    supabase.from('users').select('id,email,business_name,contact_name,n8n_client_id,admin_type,entity_role')
+      .eq('id', session.user.id).single()
+      .then(({ data }) => { if (data) { setUser(data); setError(null); } else setError('Account not found.'); });
   }, [session]);
 
-  // Fetch platform status
-  const fetchPlatforms = useCallback(async () => {
-    if (!user?.n8n_client_id) return;
-    try {
-      const res = await fetch(`${OAUTH_STATUS_URL}?client_id=${user.n8n_client_id}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setPlatforms(data.platforms || []);
-    } catch (err) {
-      setError(`Failed to load platforms: ${err.message}`);
-    }
-  }, [user]);
-
-  // Fetch connector status (separate from platforms)
-  const fetchConnectors = useCallback(async () => {
-    if (!user?.n8n_client_id) return;
-    try {
-      const res = await fetch(`${CONNECTOR_STATUS_URL}?client_id=${user.n8n_client_id}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setConnectors(data.my_connectors || []);
-    } catch (err) {
-      console.error('Failed to load connectors:', err);
-      setConnectors([]);
-    }
-  }, [user]);
-
-  useEffect(() => { fetchPlatforms(); fetchConnectors(); }, [fetchPlatforms, fetchConnectors]);
-
-  // OAuth return toast
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('status') === 'success') {
-      const pn = params.get('platform') || 'Platform';
-      setToast(`✓ ${pn.charAt(0).toUpperCase() + pn.slice(1)} connected successfully`);
-      const url = new URL(window.location);
-      ['status', 'platform', 'warnings'].forEach((k) => url.searchParams.delete(k));
-      window.history.replaceState({}, '', url);
-      setTimeout(() => { fetchPlatforms(); fetchConnectors(); }, 500);
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('status') === 'success') {
+      const pn = p.get('platform') || 'Platform';
+      setToast(`✓ ${pn.charAt(0).toUpperCase() + pn.slice(1)} connected`);
+      const u = new URL(window.location); ['status','platform','warnings'].forEach(k => u.searchParams.delete(k));
+      window.history.replaceState({}, '', u);
     }
-  }, [fetchPlatforms, fetchConnectors]);
+  }, []);
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setSession(null); setUser(null); setPlatforms(null); setConnectors(null);
-  };
+  const handleLogout = async () => { await supabase.auth.signOut(); setSession(null); setUser(null); };
 
-  // Platform counts
-  const counts = useMemo(() => {
-    if (!platforms) return { connected: 0, expired: 0, needsSetup: 0, disabled: 0 };
-    let connected = 0, expired = 0, needsSetup = 0, disabled = 0;
-    for (const p of platforms) {
-      const meta = PLATFORM_META[p.platform];
-      if (!meta || meta.hidden) continue;
-      if (p.connected && !p.is_expired) connected++;
-      else if (p.is_expired) expired++;
-      else if (!p.enabled) disabled++;
-      else needsSetup++;
-    }
-    return { connected, expired, needsSetup, disabled };
-  }, [platforms]);
+  const isAdmin = user?.entity_role === 'admin' || user?.entity_role === 'super_admin'
+    || user?.admin_type === 'super_admin' || user?.admin_type === 'sub_admin';
 
-  // Sorted platforms
-  const sortedPlatforms = useMemo(() => {
-    if (!platforms) return [];
-    const visible = PLATFORM_ORDER
-      .map((pid) => platforms.find((p) => p.platform === pid))
-      .filter((p) => p && PLATFORM_META[p.platform] && !PLATFORM_META[p.platform].hidden);
-    return visible.sort((a, b) => {
-      const order = (p) => {
-        if (!p.connected && !p.is_expired && p.enabled) return 0;
-        if (p.is_expired) return 1;
-        if (!p.enabled) return 3;
-        return 2;
-      };
-      return order(a) - order(b);
-    });
-  }, [platforms]);
+  const visibleNav = useMemo(() => {
+    if (!user) return [];
+    return NAV.filter(item => !(item.adminOnly && !isAdmin));
+  }, [user, isAdmin]);
 
-  if (authLoading) {
-    return (<><Header /><main className="main-content"><div className="loading"><div className="spinner" />Loading...</div></main><Footer /></>);
-  }
+  if (authLoading) return <div className="app-loading"><div className="spinner" /><p>Loading...</p></div>;
 
-  if (!session) {
-    return (<><Header /><main className="main-content"><LoginForm /></main><Footer /></>);
-  }
+  if (!session) return (
+    <div className="login-page">
+      <div className="login-header">
+        <a className="logo-group" href="https://scalesmall.ai">
+          <img src="https://scalesmall.ai/logo.png" alt="" width="48" height="48" />
+          <div className="logo-text">
+            <div className="logo-brand"><span className="w1">SCALE</span><span className="w2">SMALL.AI</span></div>
+            <span className="logo-tagline">Small Business Focused</span>
+          </div>
+        </a>
+      </div>
+      <LoginForm />
+    </div>
+  );
 
-  if (!user || !platforms) {
-    return (
-      <><Header user={user || { email: session.user.email }} onLogout={handleLogout} />
-        <main className="main-content">
-          {error ? (<><h1>Connect Your Platforms</h1><div className="error-box">{error}</div></>) : (<div className="loading"><div className="spinner" />Loading platform status…</div>)}
-        </main><Footer /></>
-    );
-  }
+  if (!user) return <div className="app-loading">{error ? <div className="error-box">{error}</div> : <><div className="spinner" /><p>Loading account...</p></>}</div>;
 
   return (
-    <>
-      <Header user={user} onLogout={handleLogout} />
-      <main className="main-content">
-        <h1>Connect Your Platforms</h1>
-        <p className="subtitle">
-          Connect each platform so <strong>Scale Small AI</strong> can
-          create and publish content on behalf of{' '}
-          <strong>{user.business_name}</strong>.
-        </p>
-
-        <StatusBar {...counts} />
-
-        <div className="section-label">Platforms</div>
-        <div className="platforms">
-          {sortedPlatforms.map((p, i) => (
-            <PlatformCard key={p.platform} platform={p} clientId={user.n8n_client_id} index={i} />
-          ))}
+    <div className="dashboard-layout">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <img src="https://scalesmall.ai/logo.png" alt="" width="32" height="32" className="sidebar-logo" />
+          <div className="sidebar-brand-text">
+            <span className="brand-w1">SCALE</span><span className="brand-w2">SMALL.AI</span>
+          </div>
         </div>
-
-        {connectors && connectors.length > 0 && (
-          <>
-            <div className="section-label" style={{marginTop: '2rem'}}>Photo Connectors</div>
-            <p className="subtitle" style={{marginBottom: '1rem'}}>
-              Connect your photo source so we can automatically import job site photos.
-            </p>
-            <div className="platforms">
-              {connectors.map((c) => (
-                <ConnectorCard key={c.connector_type} connector={c} clientId={user.n8n_client_id} onRefresh={fetchConnectors} />
-              ))}
-            </div>
-          </>
-        )}
+        <nav className="sidebar-nav">
+          {visibleNav.map((item, i) =>
+            item.section ? (
+              <div key={`s${i}`} className="sidebar-section">{item.section}</div>
+            ) : (
+              <Link key={item.to} to={item.to}
+                className={`sidebar-link${(item.to === '/entity' ? location.pathname === '/entity' : location.pathname.startsWith(item.to)) ? ' active' : ''}`}>
+                <span className="sidebar-icon">{item.icon}</span>
+                <span className="sidebar-label">{item.label}</span>
+              </Link>
+            )
+          )}
+        </nav>
+        <div className="sidebar-footer">
+          <div className="sidebar-user-name">{user.contact_name || user.business_name || user.email}</div>
+          <div className="sidebar-user-meta">
+            {isAdmin ? <span className="role-admin">Admin</span> : <span className="role-client">Client</span>}
+          </div>
+          <button className="sidebar-logout" onClick={handleLogout}>Log Out</button>
+        </div>
+      </aside>
+      <main className="dashboard-main">
+        <Routes>
+          <Route path="/" element={<Navigate to="/connections" replace />} />
+          <Route path="/connections" element={<ConnectionsPage user={user} session={session} />} />
+          <Route path="/entity" element={<EntityDashboard user={user} isAdmin={isAdmin} />} />
+          <Route path="/entity/citations" element={<EntityCitations user={user} />} />
+          <Route path="/entity/profiles" element={<EntityProfiles user={user} />} />
+          <Route path="/entity/issues" element={<EntityIssues user={user} isAdmin={isAdmin} />} />
+          <Route path="/entity/alerts" element={<EntityAlerts user={user} />} />
+          {isAdmin && <>
+            <Route path="/entity/scans" element={<EntityScans user={user} />} />
+            <Route path="/entity/onboarding" element={<EntityOnboarding user={user} />} />
+            <Route path="/entity/admin" element={<EntityAdmin user={user} />} />
+          </>}
+          <Route path="*" element={<Navigate to="/connections" replace />} />
+        </Routes>
       </main>
-
-      <Footer />
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}
-    </>
+    </div>
   );
 }
