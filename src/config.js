@@ -1,6 +1,7 @@
 import { SUPABASE_URL } from './supabase';
 
 export const OAUTH_STATUS_URL = `${SUPABASE_URL}/functions/v1/oauth-status`;
+export const CONNECTOR_STATUS_URL = `${SUPABASE_URL}/functions/v1/connect-connector`;
 
 export const PLATFORM_ORDER = [
   'facebook', 'instagram', 'x', 'youtube', 'linkedin', 'gbp', 'tiktok', 'website',
@@ -16,5 +17,4 @@ export const PLATFORM_META = {
   tiktok:    { name: 'TikTok',          icon: '♪',  iconClass: 'ic-tt',  note: 'Short-form video posting' },
   website:   { name: 'Website Gallery', icon: '🌐', iconClass: 'ic-web', note: 'Auto-publish job photos to your site', noOAuth: true },
   reddit:    { name: 'Reddit',          icon: 'R',  iconClass: 'ic-x',   hidden: true },
-  companycam:{ name: 'CompanyCam',      icon: '📸', iconClass: 'ic-cc',  hidden: true },
 };
