@@ -157,16 +157,9 @@ export default function App() {
 
         <StatusBar {...counts} />
 
-        <div className="section-label">Platforms</div>
-        <div className="platforms">
-          {sortedPlatforms.map((p, i) => (
-            <PlatformCard key={p.platform} platform={p} clientId={user.n8n_client_id} index={i} />
-          ))}
-        </div>
-
         {connectors && connectors.length > 0 && (
           <>
-            <div className="section-label" style={{marginTop: '2rem'}}>Photo Connectors</div>
+            <div className="section-label">Connectors</div>
             <p className="subtitle" style={{marginBottom: '1rem'}}>
               Connect your photo source so we can automatically import job site photos.
             </p>
@@ -177,6 +170,13 @@ export default function App() {
             </div>
           </>
         )}
+
+        <div className="section-label" style={{marginTop: '2rem'}}>Platforms</div>
+        <div className="platforms">
+          {sortedPlatforms.map((p, i) => (
+            <PlatformCard key={p.platform} platform={p} clientId={user.n8n_client_id} index={i} />
+          ))}
+        </div>
       </main>
 
       <Footer />
