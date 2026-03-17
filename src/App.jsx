@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { supabase, SUPABASE_URL } from './supabase';
 import { ConnectPanel, Toast } from 'ssai-shared';
 import 'ssai-shared/src/connect.css';
@@ -10,6 +10,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [user, setUser] = useState(null);
+  const [services, setServices] = useState([]);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
 
@@ -17,7 +18,7 @@ export default function App() {
     supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setAuthLoading(false); });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (!session) { setUser(null); }
+      if (!session) { setUser(null); setServices([]); }
     });
     return () => subscription.unsubscribe();
   }, []);
@@ -34,9 +35,22 @@ export default function App() {
       if (!data.n8n_client_id) { setError('No client ID linked to your account yet. Complete onboarding first.'); return; }
       setUser(data);
       setError(null);
+
+      // Fetch services_enabled from client_profiles
+      const { data: cp } = await supabase
+        .from('client_profiles')
+        .select('services_enabled')
+        .eq('client_id', data.n8n_client_id)
+        .single();
+      setServices(cp?.services_enabled || []);
     }
     fetchUser();
   }, [session]);
+
+  const getToken = useCallback(async () => {
+    const { data: { session: s } } = await supabase.auth.getSession();
+    return s?.access_token;
+  }, []);
 
   // OAuth return toast
   useEffect(() => {
@@ -89,6 +103,8 @@ export default function App() {
           clientId={user.n8n_client_id}
           supabaseUrl={SUPABASE_URL}
           businessName={user.business_name}
+          services={services}
+          getToken={getToken}
         />
       </main>
 
