@@ -5,6 +5,8 @@ import 'ssai-shared/src/connect.css';
 import Header from './components/Header';
 import LoginForm from './components/LoginForm';
 import Footer from './components/Footer';
+import SubscriptionBanner from './components/SubscriptionBanner';
+import OnboardingWizard from './components/OnboardingWizard';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -13,6 +15,8 @@ export default function App() {
   const [services, setServices] = useState([]);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardDismissed, setWizardDismissed] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setAuthLoading(false); });
@@ -28,7 +32,7 @@ export default function App() {
     async function fetchUser() {
       const { data, error: err } = await supabase
         .from('users')
-        .select('id, email, business_name, n8n_client_id')
+        .select('id, email, business_name, n8n_client_id, subscription_status, customer_id')
         .eq('id', session.user.id)
         .single();
       if (err || !data) { setError('Could not find your account. Contact support.'); return; }
@@ -36,13 +40,21 @@ export default function App() {
       setUser(data);
       setError(null);
 
-      // Fetch services_enabled from client_profiles
       const { data: cp } = await supabase
         .from('client_profiles')
-        .select('services_enabled')
+        .select('services_enabled, setup_completed_at')
         .eq('client_id', data.n8n_client_id)
         .single();
       setServices(cp?.services_enabled || []);
+
+      // Show wizard for new users (no services + no subscription + not completed before)
+      const { count: svcCount } = await supabase
+        .from('client_services')
+        .select('id', { count: 'exact', head: true })
+        .eq('client_id', data.n8n_client_id);
+
+      const isNew = !cp?.setup_completed_at && (!svcCount || svcCount === 0) && !data.subscription_status;
+      setShowWizard(isNew);
     }
     fetchUser();
   }, [session]);
@@ -52,14 +64,19 @@ export default function App() {
     return s?.access_token;
   }, []);
 
-  // OAuth return toast
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('status') === 'success') {
       const pn = params.get('platform') || 'Platform';
       setToast(`✓ ${pn.charAt(0).toUpperCase() + pn.slice(1)} connected successfully`);
+    }
+    if (params.get('billing') === 'success') {
+      setToast('✓ Subscription activated! Your services are now running.');
+      setShowWizard(false);
+    }
+    if (params.get('status') || params.get('billing')) {
       const url = new URL(window.location);
-      ['status', 'platform', 'warnings'].forEach((k) => url.searchParams.delete(k));
+      ['status', 'platform', 'warnings', 'billing'].forEach((k) => url.searchParams.delete(k));
       window.history.replaceState({}, '', url);
     }
   }, []);
@@ -67,6 +84,16 @@ export default function App() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setSession(null); setUser(null);
+  };
+
+  const handleWizardComplete = async () => {
+    setShowWizard(false);
+    setWizardDismissed(true);
+    if (user?.n8n_client_id) {
+      await supabase.from('client_profiles')
+        .update({ setup_completed_at: new Date().toISOString() })
+        .eq('client_id', user.n8n_client_id);
+    }
   };
 
   if (authLoading) {
@@ -88,6 +115,19 @@ export default function App() {
     );
   }
 
+  if (showWizard && !wizardDismissed) {
+    return (
+      <>
+        <Header user={user} onLogout={handleLogout} />
+        <main className="main-content">
+          <OnboardingWizard user={user} supabase={supabase} services={services} getToken={getToken} onComplete={handleWizardComplete} />
+        </main>
+        <Footer />
+        {toast && <Toast message={toast} onDone={() => setToast(null)} />}
+      </>
+    );
+  }
+
   return (
     <>
       <Header user={user} onLogout={handleLogout} />
@@ -99,6 +139,8 @@ export default function App() {
           <strong>{user.business_name}</strong>.
         </p>
 
+        <SubscriptionBanner user={user} supabase={supabase} />
+
         <ConnectPanel
           clientId={user.n8n_client_id}
           supabaseUrl={SUPABASE_URL}
@@ -107,7 +149,6 @@ export default function App() {
           getToken={getToken}
         />
       </main>
-
       <Footer />
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}
     </>
