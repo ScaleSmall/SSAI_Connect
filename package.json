@@ -1,7 +1,7 @@
 {
   "name": "connect-scalesmall",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,7 @@
     "@supabase/supabase-js": "^2.49.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "ssai-shared": "github:ScaleSmall/SSAI_Shared"
+    "ssai-shared": "github:ScaleSmall/SSAI_Shared#main"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
