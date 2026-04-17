@@ -4,6 +4,10 @@ on:
   repository_dispatch:
     types: [shared-updated]
 
+concurrency:
+  group: update-shared
+  cancel-in-progress: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -14,7 +18,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Configure git auth for private packages
         run: git config --global url."https://${{ secrets.SCALESMALL_PAT }}@github.com/".insteadOf "https://github.com/"
@@ -27,4 +31,7 @@ jobs:
           git config user.name "ScaleSmall Bot"
           git config user.email "admin@scalesmall.ai"
           git add package.json package-lock.json 2>/dev/null || true
-          git diff --cached --quiet || (git commit -m "chore: update ssai-shared to ${{ github.event.client_payload.ref }}" && git push)
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: update ssai-shared to ${{ github.event.client_payload.ref }}"
+          git pull --rebase origin main
+          git push
