@@ -651,7 +651,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       </div>
 
       <div className="sc-section-label">Social Platforms</div>
-      <p className="sc-subtitle">Connect the socials you actually use. Instagram shares the Facebook auth path, so connect Facebook first or alongside it.</p>
+      <p className="sc-subtitle">Connect the socials you actually use.</p>
       <div className="sc-platform-selection-note">
         Toggle off any social platform, Google Business Profile, or Website Gallery that you do not want to use or do not have. You can change this later by returning to Connect Platforms in the dashboard.
       </div>
@@ -706,7 +706,8 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                 }
 
           return (
-            <div key={p.platform} className="sc-row" style={focused ? { borderColor: 'rgba(96,165,250,0.5)' } : undefined}>
+            <React.Fragment key={p.platform}>
+            <div className="sc-row" style={focused ? { borderColor: 'rgba(96,165,250,0.5)' } : undefined}>
               <div className="sc-row-main">
                 <BrandIcon icon={p.icon} />
                 <div className="sc-info">
@@ -839,6 +840,12 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                 <span style={{ color: '#fca5a5', fontSize: 12 }}>{selectionError}</span>
               )}
             </div>
+            {p.platform === 'facebook' && (
+              <div className="sc-platform-selection-note sc-instagram-auth-note">
+                Instagram shares the Facebook authorization, connect Facebook first.
+              </div>
+            )}
+            </React.Fragment>
           );
         })}
       </div>
@@ -1139,7 +1146,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
             onClick={() => saveConnectFlow('saved')}
             disabled={connectFlowBusy}
           >
-            {connectFlowBusy ? 'Saving...' : 'Save and exit'}
+            {connectFlowBusy ? 'Saving...' : 'Save & Setup Later'}
           </button>
           <button
             type="button"

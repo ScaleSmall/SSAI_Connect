@@ -5,7 +5,6 @@ import { ConnectPanel } from './components/shared/ConnectPanel';
 import Header from './components/Header';
 import LoginForm from './components/LoginForm';
 import Footer from './components/Footer';
-import SubscriptionBanner from './components/SubscriptionBanner';
 import OnboardingWizard from './components/OnboardingWizard';
 import OAuthCompletePage from './OAuthCompletePage';
 
@@ -143,9 +142,6 @@ export default function App() {
           create and publish content on behalf of{' '}
           <strong>{user.business_name}</strong>.
         </p>
-
-        <SubscriptionBanner user={user} supabase={supabase} />
-
         <ConnectPanel
           clientId={user.n8n_client_id}
           supabaseUrl={SUPABASE_URL}

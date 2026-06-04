@@ -12,6 +12,12 @@ function includesAll(source, needles, label) {
   }
 }
 
+function excludesAll(source, needles, label) {
+  for (const needle of needles) {
+    assert(!source.includes(needle), `${label} should not include "${needle}"`);
+  }
+}
+
 const app = await load('src/App.jsx');
 const connectPanel = await load('src/components/shared/ConnectPanel.jsx');
 const connectStyles = await load('src/components/shared/connect.css');
@@ -30,6 +36,11 @@ includesAll(app, [
   'allowPublisherProxyConfig={isAdmin}',
 ], 'SSAI_Connect app contract');
 
+excludesAll(app, [
+  "import SubscriptionBanner from './components/SubscriptionBanner'",
+  '<SubscriptionBanner',
+], 'SSAI_Connect subscription banner removal contract');
+
 includesAll(connectPanel, [
   "source_type: 'manual_photo_upload'",
   "iconFor('manual_photo_upload', 'UP')",
@@ -47,7 +58,15 @@ includesAll(connectPanel, [
   'manualUploadResult.customer_inserted',
   "const DATA_SOURCES = [",
   "const CRM_PLATFORMS = [",
+  'sc-instagram-auth-note',
+  'Instagram shares the Facebook authorization, connect Facebook first.',
+  'Save & Setup Later',
 ], 'SSAI_Connect local ConnectPanel upload contract');
+
+excludesAll(connectPanel, [
+  'Instagram shares the Facebook auth path',
+  'Save and exit',
+], 'SSAI_Connect finish button copy contract');
 
 includesAll(connectPanel, [
   'BRAND_ICON_STYLE',
