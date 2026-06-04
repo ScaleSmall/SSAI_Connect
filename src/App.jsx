@@ -7,6 +7,7 @@ import LoginForm from './components/LoginForm';
 import Footer from './components/Footer';
 import SubscriptionBanner from './components/SubscriptionBanner';
 import OnboardingWizard from './components/OnboardingWizard';
+import OAuthCompletePage from './OAuthCompletePage';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -95,6 +96,8 @@ export default function App() {
         .eq('client_id', user.n8n_client_id);
     }
   };
+
+  if (window.location.pathname === '/oauth-complete') return <OAuthCompletePage />;
 
   if (authLoading) {
     return (<><Header /><main className="main-content"><div className="loading"><div className="spinner" />Loading...</div></main><Footer /></>);

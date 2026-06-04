@@ -1,0 +1,28 @@
+name: Validate Connect app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Configure git auth for shared package
+        env:
+          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
+        run: |
+          if [ -n "$SCALESMALL_PAT" ]; then
+            git config --global url."https://${SCALESMALL_PAT}@github.com/".insteadOf "https://github.com/"
+          fi
+      - name: Install
+        run: npm ci
+      - name: Validate cloud connect contract
+        run: node scripts/verify-connect-cloud-contract.mjs
+      - name: Build
+        run: npm run build
