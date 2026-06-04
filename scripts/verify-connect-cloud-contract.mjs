@@ -21,6 +21,9 @@ includesAll(app, [
   "window.location.pathname === '/oauth-complete'",
   '<OAuthCompletePage />',
   'getToken={getToken}',
+  'admin_type',
+  "['admin', 'super_admin', 'sub_admin'].includes(String(user?.admin_type || ''))",
+  'allowPublisherProxyConfig={isAdmin}',
 ], 'SSAI_Connect app contract');
 
 includesAll(oauthComplete, [
