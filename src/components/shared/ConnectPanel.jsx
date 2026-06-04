@@ -553,6 +553,12 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const powSetupRequired = serviceSet.has('jobs_to_socials');
   const photoSourceRequired = powSetupRequired;
   const customerDataRequired = serviceSet.has('repeat_referral') || serviceSet.has('customer_intelligence');
+  const hasSelectedServices = serviceSet.size > 0;
+  const showPowConnectionSections = !hasSelectedServices || powSetupRequired;
+  const showSocialPlatforms = showPowConnectionSections;
+  const showPhotoFeedSources = showPowConnectionSections;
+  const showCustomerDataSources = !hasSelectedServices || customerDataRequired;
+  const showConnectChecks = showSocialPlatforms || showPhotoFeedSources || showCustomerDataSources;
   const customerDataConnected = crmConnected || customerRecordCount > 0;
   const gatedMissingSelectedPlatforms = powSetupRequired ? missingSelectedPlatforms : [];
   const photoSourceReady = !photoSourceRequired || photoSourceConnected;
@@ -650,18 +656,20 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
         <div className="sc-stat"><span className="sc-dot sc-dot-green" />Connect apps and data sources for <strong>{businessName || 'this client'}</strong></div>
       </div>
 
-      <div className="sc-section-label">Social Platforms</div>
-      <p className="sc-subtitle">Connect the socials you actually use.</p>
-      <div className="sc-platform-selection-note">
-        Toggle off any social platform, Google Business Profile, or Website Gallery that you do not want to use or do not have. You can change this later by returning to Connect Platforms in the dashboard.
-      </div>
-      <div className="sc-auth-reminder">
-        <strong>Facebook & LinkedIn page access:</strong> Open <strong>dashboard.scalesmall.ai</strong> or <strong>connect.scalesmall.ai</strong> in an incognito window or Chrome profile where the page admin account is signed in. Then sign in to Scale Small AI with the normal dashboard login, click Connect, and use the Facebook or LinkedIn popup with the account that manages the business/company page.
-        <button type="button" className="sc-auth-info-button" onClick={() => setPageAccessInfoOpen(true)}>Click here for more info</button>
-      </div>
-      {platformSelectionError && <div ref={errorRef} className="sc-row-error" style={{ marginBottom: 12 }}>{platformSelectionError}</div>}
-      <div className="sc-list">
-        {SOCIAL_PLATFORMS.map(p => {
+      {showSocialPlatforms && (
+        <>
+          <div className="sc-section-label">Social Platforms</div>
+          <p className="sc-subtitle">Connect the socials you actually use.</p>
+          <div className="sc-platform-selection-note">
+            Toggle off any social platform, Google Business Profile, or Website Gallery that you do not want to use or do not have. You can change this later by returning to Connect Platforms in the dashboard.
+          </div>
+          <div className="sc-auth-reminder">
+            <strong>Facebook & LinkedIn page access:</strong> Open <strong>dashboard.scalesmall.ai</strong> or <strong>connect.scalesmall.ai</strong> in an incognito window or Chrome profile where the page admin account is signed in. Then sign in to Scale Small AI with the normal dashboard login, click Connect, and use the Facebook or LinkedIn popup with the account that manages the business/company page.
+            <button type="button" className="sc-auth-info-button" onClick={() => setPageAccessInfoOpen(true)}>Click here for more info</button>
+          </div>
+          {platformSelectionError && <div ref={errorRef} className="sc-row-error" style={{ marginBottom: 12 }}>{platformSelectionError}</div>}
+          <div className="sc-list">
+            {SOCIAL_PLATFORMS.map(p => {
           const enabled = p.platform === 'website' || serviceSet.size === 0 || serviceSet.has('jobs_to_socials') || serviceSet.has('repeat_referral') || serviceSet.has('entity_system');
                 const status = platformMap[p.platform];
                 const selectedForPow = selectedPlatformSet.has(p.platform) && status?.selected !== false;
@@ -847,8 +855,10 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
             )}
             </React.Fragment>
           );
-        })}
-      </div>
+            })}
+          </div>
+        </>
+      )}
 
       {allowPublisherProxyConfig && (
         <div>
@@ -902,10 +912,12 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
         </div>
       )}
 
-      <div className="sc-section-label" style={{ marginTop: 20 }}>Photo Feed Sources</div>
-      <p className="sc-subtitle">Connect where your team takes job photos.</p>
-      <div className="sc-list">
-        {DATA_SOURCES.map(s => {
+      {showPhotoFeedSources && (
+        <>
+          <div className="sc-section-label" style={{ marginTop: 20 }}>Photo Feed Sources</div>
+          <p className="sc-subtitle">Connect where your team takes job photos.</p>
+          <div className="sc-list">
+            {DATA_SOURCES.map(s => {
           const conn = connectorMap[s.source_type];
           const isManualPhotoUpload = s.source_type === 'manual_photo_upload';
           const isLiveSource = LIVE_PHOTO_SOURCE_CONNECTOR_TYPES.has(s.source_type);
@@ -996,13 +1008,17 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
               )}
             </div>
           );
-        })}
-      </div>
+            })}
+          </div>
+        </>
+      )}
 
-      <div className="sc-section-label" style={{ marginTop: 20 }}>Customer Data Sources</div>
-      <p className="sc-subtitle">Connect your CRM to enrich outreach with real customer data.</p>
-      <div className="sc-list">
-        {CRM_PLATFORMS.map(crm => {
+      {showCustomerDataSources && (
+        <>
+          <div className="sc-section-label" style={{ marginTop: 20 }}>Customer Data Sources</div>
+          <p className="sc-subtitle">Connect your CRM to enrich outreach with real customer data.</p>
+          <div className="sc-list">
+            {CRM_PLATFORMS.map(crm => {
           const conn = connectorMap[crm.connector_type];
           const isConnected = conn?.is_active === true;
           const isComingSoon = conn?.availability_status === 'coming_soon' || conn?.status === 'coming_soon';
@@ -1043,88 +1059,98 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
               </div>
             </div>
           );
-        })}
+            })}
 
-        {/* Manual Upload row */}
-        <div className="sc-row">
-          <div className="sc-row-main">
-            <span className="sc-icon sc-icon-badge" aria-hidden="true" style={BRAND_ICON_STYLE}>↑</span>
-            <div className="sc-info">
-              <div className="sc-name">Manual Upload</div>
-              {manualUploadResult ? (
-                <div className="sc-note" style={{ color: '#86efac' }}>
-                  {manualUploadResult.inserted > 0 && `${manualUploadResult.inserted} added`}
-                  {manualUploadResult.inserted > 0 && (manualUploadResult.updated > 0 || manualUploadResult.customer_inserted > 0 || manualUploadResult.customer_updated > 0 || manualUploadResult.skipped > 0) && ' · '}
-                  {manualUploadResult.updated > 0 && `${manualUploadResult.updated} updated`}
-                  {manualUploadResult.updated > 0 && (manualUploadResult.customer_inserted > 0 || manualUploadResult.customer_updated > 0 || manualUploadResult.skipped > 0) && ' · '}
-                  {manualUploadResult.customer_inserted > 0 && `${manualUploadResult.customer_inserted} customers ready`}
-                  {manualUploadResult.customer_inserted > 0 && (manualUploadResult.customer_updated > 0 || manualUploadResult.skipped > 0) && ' · '}
-                  {manualUploadResult.customer_updated > 0 && `${manualUploadResult.customer_updated} customers updated`}
-                  {manualUploadResult.customer_updated > 0 && manualUploadResult.skipped > 0 && ' · '}
-                  {manualUploadResult.skipped > 0 && `${manualUploadResult.skipped} unchanged`}
+            {/* Manual Upload row */}
+            <div className="sc-row">
+              <div className="sc-row-main">
+                <span className="sc-icon sc-icon-badge" aria-hidden="true" style={BRAND_ICON_STYLE}>↑</span>
+                <div className="sc-info">
+                  <div className="sc-name">Manual Upload</div>
+                  {manualUploadResult ? (
+                    <div className="sc-note" style={{ color: '#86efac' }}>
+                      {manualUploadResult.inserted > 0 && `${manualUploadResult.inserted} added`}
+                      {manualUploadResult.inserted > 0 && (manualUploadResult.updated > 0 || manualUploadResult.customer_inserted > 0 || manualUploadResult.customer_updated > 0 || manualUploadResult.skipped > 0) && ' · '}
+                      {manualUploadResult.updated > 0 && `${manualUploadResult.updated} updated`}
+                      {manualUploadResult.updated > 0 && (manualUploadResult.customer_inserted > 0 || manualUploadResult.customer_updated > 0 || manualUploadResult.skipped > 0) && ' · '}
+                      {manualUploadResult.customer_inserted > 0 && `${manualUploadResult.customer_inserted} customers ready`}
+                      {manualUploadResult.customer_inserted > 0 && (manualUploadResult.customer_updated > 0 || manualUploadResult.skipped > 0) && ' · '}
+                      {manualUploadResult.customer_updated > 0 && `${manualUploadResult.customer_updated} customers updated`}
+                      {manualUploadResult.customer_updated > 0 && manualUploadResult.skipped > 0 && ' · '}
+                      {manualUploadResult.skipped > 0 && `${manualUploadResult.skipped} unchanged`}
+                    </div>
+                  ) : (
+                    <div className="sc-note">CSV, TSV, JSON, XLSX, XLS, VCF — duplicates merged automatically</div>
+                  )}
                 </div>
-              ) : (
-                <div className="sc-note">CSV, TSV, JSON, XLSX, XLS, VCF — duplicates merged automatically</div>
+                <div className="sc-actions">
+                  {manualUploadBusy
+                    ? <span className="sc-badge sc-badge-amber">Uploading…</span>
+                    : manualUploadResult
+                      ? <span className="sc-badge sc-badge-green">Done</span>
+                      : <span className="sc-badge sc-badge-off">No file</span>
+                  }
+                  <button
+                    className="sc-btn sc-btn-primary"
+                    disabled={manualUploadBusy}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    {manualUploadBusy ? 'Uploading…' : 'Upload File'}
+                  </button>
+                </div>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.tsv,.json,.xlsx,.xls,.vcf,.txt"
+                style={{ display: 'none' }}
+                onChange={handleManualUpload}
+              />
+              {manualUploadError && (
+                <span style={{ color: '#fca5a5', fontSize: 12, padding: '4px 0 0 4px' }}>{manualUploadError}</span>
               )}
             </div>
-            <div className="sc-actions">
-              {manualUploadBusy
-                ? <span className="sc-badge sc-badge-amber">Uploading…</span>
-                : manualUploadResult
-                  ? <span className="sc-badge sc-badge-green">Done</span>
-                  : <span className="sc-badge sc-badge-off">No file</span>
-              }
-              <button
-                className="sc-btn sc-btn-primary"
-                disabled={manualUploadBusy}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                {manualUploadBusy ? 'Uploading…' : 'Upload File'}
-              </button>
-            </div>
           </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv,.tsv,.json,.xlsx,.xls,.vcf,.txt"
-            style={{ display: 'none' }}
-            onChange={handleManualUpload}
-          />
-          {manualUploadError && (
-            <span style={{ color: '#fca5a5', fontSize: 12, padding: '4px 0 0 4px' }}>{manualUploadError}</span>
-          )}
-        </div>
-      </div>
+        </>
+      )}
 
       <div className="sc-connect-finish">
         <div className="sc-connect-finish-copy">
           <div className="sc-section-label" style={{ marginTop: 0 }}>Finish connection setup</div>
           <p className="sc-subtitle" style={{ marginBottom: 0 }}>
-            Save if you need to come back later. Finish when the required sections for your selected services are ready. Optional connections can be added later from this page.
+            Save if you need to come back later. Finish when the sections shown here are ready. Other connections can be added later from the dashboard.
           </p>
-          <div className="sc-connect-checks">
-            <span className={`sc-badge ${powSetupRequired ? (gatedMissingSelectedPlatforms.length === 0 ? 'sc-badge-green' : 'sc-badge-amber') : 'sc-badge-off'}`}>
-              {powSetupRequired
-                ? gatedMissingSelectedPlatforms.length === 0
-                  ? 'Selected platforms ready'
-                  : `${gatedMissingSelectedPlatforms.length} platform${gatedMissingSelectedPlatforms.length === 1 ? '' : 's'} need attention`
-                : 'Posting platforms optional'}
-            </span>
-            <span className={`sc-badge ${photoSourceRequired ? (photoSourceConnected ? 'sc-badge-green' : 'sc-badge-amber') : (photoSourceConnected ? 'sc-badge-green' : 'sc-badge-off')}`}>
-              {photoSourceRequired
-                ? photoSourceConnected ? 'Photo source connected' : 'Photo source needed'
-                : photoSourceConnected ? 'Photo source connected' : 'Photo source optional'}
-            </span>
-            <span className={`sc-badge ${customerDataRequired ? (customerDataConnected ? 'sc-badge-green' : 'sc-badge-amber') : (customerDataConnected ? 'sc-badge-green' : 'sc-badge-off')}`}>
-              {customerDataConnected
-                ? customerRecordCount > 0
-                  ? `Customer data ready (${customerRecordCount})`
-                  : 'Customer source connected'
-                : customerDataRequired
-                  ? 'Customer data needed'
-                  : 'Customer data optional'}
-            </span>
-          </div>
+          {showConnectChecks && (
+            <div className="sc-connect-checks">
+              {showSocialPlatforms && (
+                <span className={`sc-badge ${powSetupRequired ? (gatedMissingSelectedPlatforms.length === 0 ? 'sc-badge-green' : 'sc-badge-amber') : 'sc-badge-off'}`}>
+                  {powSetupRequired
+                    ? gatedMissingSelectedPlatforms.length === 0
+                      ? 'Selected platforms ready'
+                      : `${gatedMissingSelectedPlatforms.length} platform${gatedMissingSelectedPlatforms.length === 1 ? '' : 's'} need attention`
+                    : 'Posting platforms optional'}
+                </span>
+              )}
+              {showPhotoFeedSources && (
+                <span className={`sc-badge ${photoSourceRequired ? (photoSourceConnected ? 'sc-badge-green' : 'sc-badge-amber') : (photoSourceConnected ? 'sc-badge-green' : 'sc-badge-off')}`}>
+                  {photoSourceRequired
+                    ? photoSourceConnected ? 'Photo source connected' : 'Photo source needed'
+                    : photoSourceConnected ? 'Photo source connected' : 'Photo source optional'}
+                </span>
+              )}
+              {showCustomerDataSources && (
+                <span className={`sc-badge ${customerDataRequired ? (customerDataConnected ? 'sc-badge-green' : 'sc-badge-amber') : (customerDataConnected ? 'sc-badge-green' : 'sc-badge-off')}`}>
+                  {customerDataConnected
+                    ? customerRecordCount > 0
+                      ? `Customer data ready (${customerRecordCount})`
+                      : 'Customer source connected'
+                    : customerDataRequired
+                      ? 'Customer data needed'
+                      : 'Customer data optional'}
+                </span>
+              )}
+            </div>
+          )}
           {gatedMissingSelectedPlatforms.length > 0 && (
             <div className="sc-note">Needs attention: {gatedMissingSelectedPlatforms.join(', ')}</div>
           )}

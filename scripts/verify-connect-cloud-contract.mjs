@@ -31,14 +31,13 @@ includesAll(app, [
   "window.location.pathname === '/oauth-complete'",
   '<OAuthCompletePage />',
   'getToken={getToken}',
-  'admin_type',
-  "['admin', 'super_admin', 'sub_admin'].includes(String(user?.admin_type || ''))",
-  'allowPublisherProxyConfig={isAdmin}',
 ], 'SSAI_Connect app contract');
 
 excludesAll(app, [
   "import SubscriptionBanner from './components/SubscriptionBanner'",
   '<SubscriptionBanner',
+  'admin_type',
+  'allowPublisherProxyConfig={isAdmin}',
 ], 'SSAI_Connect subscription banner removal contract');
 
 includesAll(connectPanel, [
@@ -61,6 +60,11 @@ includesAll(connectPanel, [
   'sc-instagram-auth-note',
   'Instagram shares the Facebook authorization, connect Facebook first.',
   'Save & Setup Later',
+  'const showPowConnectionSections = !hasSelectedServices || powSetupRequired',
+  'const showCustomerDataSources = !hasSelectedServices || customerDataRequired',
+  '{showSocialPlatforms && (',
+  '{showPhotoFeedSources && (',
+  '{showCustomerDataSources && (',
 ], 'SSAI_Connect local ConnectPanel upload contract');
 
 excludesAll(connectPanel, [

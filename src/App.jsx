@@ -32,7 +32,7 @@ export default function App() {
     async function fetchUser() {
       const { data, error: err } = await supabase
         .from('users')
-        .select('id, email, business_name, n8n_client_id, admin_type, subscription_status, customer_id')
+        .select('id, email, business_name, n8n_client_id, subscription_status, customer_id')
         .eq('id', session.user.id)
         .single();
       if (err || !data) { setError('Could not find your account. Contact support.'); return; }
@@ -85,8 +85,6 @@ export default function App() {
     await supabase.auth.signOut();
     setSession(null); setUser(null);
   };
-
-  const isAdmin = ['admin', 'super_admin', 'sub_admin'].includes(String(user?.admin_type || ''));
 
   const handleWizardComplete = async () => {
     setShowWizard(false);
@@ -148,7 +146,6 @@ export default function App() {
           businessName={user.business_name}
           services={services}
           getToken={getToken}
-          allowPublisherProxyConfig={isAdmin}
         />
       </main>
       <Footer />
