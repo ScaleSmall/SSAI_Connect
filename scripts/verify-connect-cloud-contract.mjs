@@ -13,11 +13,15 @@ function includesAll(source, needles, label) {
 }
 
 const app = await load('src/App.jsx');
+const connectPanel = await load('src/components/shared/ConnectPanel.jsx');
+const connectStyles = await load('src/components/shared/connect.css');
+const icons = await load('src/lib/icons.js');
 const oauthComplete = await load('src/OAuthCompletePage.jsx');
 const packageSource = await load('package.json');
 
 includesAll(app, [
-  "import { ConnectPanel, Toast } from 'ssai-shared'",
+  "import { Toast } from 'ssai-shared'",
+  "import { ConnectPanel } from './components/shared/ConnectPanel'",
   "window.location.pathname === '/oauth-complete'",
   '<OAuthCompletePage />',
   'getToken={getToken}',
@@ -25,6 +29,47 @@ includesAll(app, [
   "['admin', 'super_admin', 'sub_admin'].includes(String(user?.admin_type || ''))",
   'allowPublisherProxyConfig={isAdmin}',
 ], 'SSAI_Connect app contract');
+
+includesAll(connectPanel, [
+  "source_type: 'manual_photo_upload'",
+  "iconFor('manual_photo_upload', 'UP')",
+  '/functions/v1/upload-photo-feed',
+  "fd.append('files', file)",
+  'accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"',
+  'Upload Photos',
+  'Upload More',
+  "connStatus === 'setup_required'",
+  '/functions/v1/upload-crm-data',
+  "fd.append('file', file)",
+  "fd.append('client_id', clientId)",
+  'CSV, TSV, JSON, XLSX, XLS, VCF',
+  'Upload File',
+  'manualUploadResult.customer_inserted',
+  "const DATA_SOURCES = [",
+  "const CRM_PLATFORMS = [",
+], 'SSAI_Connect local ConnectPanel upload contract');
+
+includesAll(connectPanel, [
+  'BRAND_ICON_STYLE',
+  'BrandIcon',
+  'sc-icon-brand',
+  './connect.css',
+  './connect-flow.css',
+], 'SSAI_Connect dashboard-matched icon contract');
+
+includesAll(icons, [
+  "width: 36",
+  "height: 36",
+  "google_drive",
+  "hubspot",
+  "gohighlevel",
+  "salesforce",
+], 'SSAI_Connect local brand icon registry contract');
+
+includesAll(connectStyles, [
+  '.sc-icon{width:36px;height:36px;',
+  '.sc-icon-brand svg{width:36px;height:36px;display:block}',
+], 'SSAI_Connect dashboard icon size CSS contract');
 
 includesAll(oauthComplete, [
   "postMessage",

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase, SUPABASE_URL } from './supabase';
-import { ConnectPanel, Toast } from 'ssai-shared';
-import 'ssai-shared/src/connect.css';
+import { Toast } from 'ssai-shared';
+import { ConnectPanel } from './components/shared/ConnectPanel';
 import Header from './components/Header';
 import LoginForm from './components/LoginForm';
 import Footer from './components/Footer';

@@ -1,0 +1,66 @@
+.sc-connect-finish {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  margin-top: 22px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(34, 197, 94, .28);
+  background: linear-gradient(135deg, rgba(34, 197, 94, .08), rgba(37, 99, 235, .08));
+}
+
+.sc-connect-finish-copy {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sc-connect-checks {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sc-connect-blockers {
+  border: 1px solid rgba(245, 158, 11, .32);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, .08);
+  color: #fde68a;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
+.sc-connect-blockers strong {
+  color: #fff7ed;
+}
+
+.sc-connect-blockers ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.sc-connect-finish-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sc-connect-finish .sc-success,
+.sc-connect-finish .sc-row-error {
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .sc-connect-finish {
+    flex-direction: column;
+  }
+
+  .sc-connect-finish-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
