@@ -7,6 +7,7 @@ import LoginForm from './components/LoginForm';
 import Footer from './components/Footer';
 import OnboardingWizard from './components/OnboardingWizard';
 import OAuthCompletePage from './OAuthCompletePage';
+import RRPublicRedirect from './RRPublicRedirect';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -97,6 +98,7 @@ export default function App() {
   };
 
   if (window.location.pathname === '/oauth-complete') return <OAuthCompletePage />;
+  if (window.location.pathname === '/referral' || window.location.pathname === '/unsubscribe') return <RRPublicRedirect />;
 
   if (authLoading) {
     return (<><Header /><main className="main-content"><div className="loading"><div className="spinner" />Loading...</div></main><Footer /></>);
