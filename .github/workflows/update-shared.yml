@@ -8,30 +8,62 @@ concurrency:
   group: update-shared
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   update:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.SSAI_PROD_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.SSAI_PROD_SUPABASE_ANON_KEY }}
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
         with:
           token: ${{ secrets.SCALESMALL_PAT }}
+          persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: '22'
+          node-version: '24'
+
+      - name: Validate required secrets
+        env:
+          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
+        run: |
+          set -euo pipefail
+          for name in SCALESMALL_PAT VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required secret-backed env $name"
+              exit 1
+            fi
+            if [[ "${!name}" =~ (your-|replace-with|example|changeme|placeholder) ]]; then
+              echo "::error::$name must be a real value"
+              exit 1
+            fi
+          done
 
       - name: Configure git auth for private packages
-        run: git config --global url."https://${{ secrets.SCALESMALL_PAT }}@github.com/".insteadOf "https://github.com/"
+        env:
+          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
+        run: git config --global url."https://${SCALESMALL_PAT}@github.com/".insteadOf "https://github.com/"
 
       - name: Update ssai-shared to latest
         run: npm install github:ScaleSmall/SSAI_Shared --save
 
-      - name: Commit and push if changed
+      - name: Commit shared package pointer if changed
         run: |
           git config user.name "ScaleSmall Bot"
           git config user.email "admin@scalesmall.ai"
           git add package.json package-lock.json 2>/dev/null || true
-          git diff --cached --quiet && echo "No changes" && exit 0
-          git commit -m "chore: update ssai-shared to ${{ github.event.client_payload.ref }}"
+          git diff --cached --quiet && echo "No changes"
+          git diff --cached --quiet || git commit -m "chore: update ssai-shared to ${{ github.event.client_payload.ref }}"
+
+      - name: Validate production readiness
+        run: npm run check
+
+      - name: Push updated shared package pointer
+        run: |
+          git diff --quiet HEAD origin/main && echo "No committed changes to push" && exit 0
           git pull --rebase origin main
           git push

@@ -26,6 +26,7 @@ const oauthComplete = await load('src/OAuthCompletePage.jsx');
 const supabaseConfig = await load('src/supabase.js');
 const packageSource = await load('package.json');
 const envVerifier = await load('scripts/verify-connect-env.mjs');
+const workflowVerifier = await load('scripts/verify-workflows.mjs');
 
 includesAll(app, [
   "import { Toast } from 'ssai-shared'",
@@ -118,6 +119,7 @@ includesAll(packageSource, [
   '"ssai-shared": "github:ScaleSmall/SSAI_Shared',
   '"build": "vite build"',
   '"check:env": "node scripts/verify-connect-env.mjs"',
+  '"check:workflows": "node scripts/verify-workflows.mjs"',
 ], 'SSAI_Connect package contract');
 
 includesAll(envVerifier, [
@@ -126,5 +128,12 @@ includesAll(envVerifier, [
   "role !== 'anon'",
   'service_role',
 ], 'SSAI_Connect env verifier contract');
+
+includesAll(workflowVerifier, [
+  'ubuntu-latest',
+  'node-version:',
+  'persist-credentials: false',
+  'npm run check',
+], 'SSAI_Connect workflow verifier contract');
 
 console.log('SSAI_Connect cloud contract verified.');

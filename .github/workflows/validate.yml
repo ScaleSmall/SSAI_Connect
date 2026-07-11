@@ -5,14 +5,22 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.SSAI_PROD_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.SSAI_PROD_SUPABASE_ANON_KEY }}
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Configure git auth for shared package
         env:
           SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
@@ -22,7 +30,5 @@ jobs:
           fi
       - name: Install
         run: npm ci
-      - name: Validate cloud connect contract
-        run: node scripts/verify-connect-cloud-contract.mjs
-      - name: Build
-        run: npm run build
+      - name: Validate production readiness
+        run: npm run check
