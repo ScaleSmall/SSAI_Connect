@@ -25,6 +25,7 @@ const icons = await load('src/lib/icons.js');
 const oauthComplete = await load('src/OAuthCompletePage.jsx');
 const supabaseConfig = await load('src/supabase.js');
 const packageSource = await load('package.json');
+const envVerifier = await load('scripts/verify-connect-env.mjs');
 
 includesAll(app, [
   "import { Toast } from 'ssai-shared'",
@@ -116,6 +117,14 @@ excludesAll(supabaseConfig, [
 includesAll(packageSource, [
   '"ssai-shared": "github:ScaleSmall/SSAI_Shared',
   '"build": "vite build"',
+  '"check:env": "node scripts/verify-connect-env.mjs"',
 ], 'SSAI_Connect package contract');
+
+includesAll(envVerifier, [
+  'VITE_SUPABASE_URL',
+  'VITE_SUPABASE_ANON_KEY',
+  "role !== 'anon'",
+  'service_role',
+], 'SSAI_Connect env verifier contract');
 
 console.log('SSAI_Connect cloud contract verified.');

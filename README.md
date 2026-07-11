@@ -21,3 +21,5 @@ npm run check
 ```
 
 The gate verifies the Connect cloud contract, committed-secret scan, dependency audit, package signatures, production build, and clean release hygiene.
+
+`npm run check` requires real `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` values in the environment. The anon key must be the browser-safe Supabase `anon` role key for the configured project, not a service-role key and not a placeholder.
