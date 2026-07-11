@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-
-const SUPABASE_URL = 'https://oyyfpkpzalhxztpcdjgq.supabase.co';
+import { SUPABASE_URL } from '../supabase';
 
 export default function SubscriptionBanner({ user, supabase }) {
   const [loading, setLoading] = useState(false);

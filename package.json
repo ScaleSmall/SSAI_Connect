@@ -7,7 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check:connect-cloud-contract": "node scripts/verify-connect-cloud-contract.mjs"
+    "check": "npm run check:production-readiness",
+    "check:production-readiness": "npm run check:connect-cloud-contract && npm run check:secrets && npm run check:audit && npm run check:signatures && git diff --check && npm run build && npm run check:hygiene",
+    "check:audit": "npm audit",
+    "check:connect-cloud-contract": "node scripts/verify-connect-cloud-contract.mjs",
+    "check:hygiene": "node scripts/check-hygiene.mjs",
+    "check:no-committed-secrets": "node scripts/verify-no-committed-secrets.mjs",
+    "check:secrets": "npm run check:no-committed-secrets",
+    "check:signatures": "npm audit signatures"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.107.0",

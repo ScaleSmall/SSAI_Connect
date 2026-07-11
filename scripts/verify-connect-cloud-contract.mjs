@@ -23,6 +23,7 @@ const connectPanel = await load('src/components/shared/ConnectPanel.jsx');
 const connectStyles = await load('src/components/shared/connect.css');
 const icons = await load('src/lib/icons.js');
 const oauthComplete = await load('src/OAuthCompletePage.jsx');
+const supabaseConfig = await load('src/supabase.js');
 const packageSource = await load('package.json');
 
 includesAll(app, [
@@ -101,6 +102,16 @@ includesAll(oauthComplete, [
   "window.location.origin",
   "window.close()",
 ], 'SSAI_Connect OAuth completion contract');
+
+includesAll(supabaseConfig, [
+  'import.meta.env.VITE_SUPABASE_URL',
+  'import.meta.env.VITE_SUPABASE_ANON_KEY',
+  'Missing required VITE_SUPABASE_ANON_KEY',
+], 'SSAI_Connect Supabase env contract');
+
+excludesAll(supabaseConfig, [
+  'eyJ',
+], 'SSAI_Connect committed Supabase key contract');
 
 includesAll(packageSource, [
   '"ssai-shared": "github:ScaleSmall/SSAI_Shared',

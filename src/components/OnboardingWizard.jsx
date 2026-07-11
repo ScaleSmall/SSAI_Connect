@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ConnectPanel } from 'ssai-shared';
+import { SUPABASE_URL } from '../supabase';
 import 'ssai-shared/src/connect.css';
-
-const SUPABASE_URL = 'https://oyyfpkpzalhxztpcdjgq.supabase.co';
 
 const STEPS = [
   { key: 'services', label: 'Define Services', icon: '🏷' },
