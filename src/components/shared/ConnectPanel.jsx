@@ -521,7 +521,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     }
   }, [clientId, base, getToken, refresh]);
 
-  const embedCode = `<script src="${base}/functions/v1/widget-gallery?format=js" data-client="${clientId}"><\/script>`;
+  const embedCode = `<script src="${base}/functions/v1/widget-gallery?format=js" data-client="${clientId}" data-render="auto" data-modules="beacon,gallery,articles"><\/script>`;
   const copyEmbed = useCallback(() => {
     navigator.clipboard.writeText(embedCode);
     setEmbedCopied(true);
