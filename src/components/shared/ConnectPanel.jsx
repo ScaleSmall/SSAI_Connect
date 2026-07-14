@@ -33,6 +33,30 @@ const SOCIAL_PLATFORMS = [
 
 const SOCIAL_PLATFORM_SLUGS = SOCIAL_PLATFORMS.map(item => item.platform);
 const SOCIAL_PLATFORM_SET = new Set(SOCIAL_PLATFORM_SLUGS);
+const CONTENT_ENGINE_SOCIAL_PLATFORM_SET = new Set(['facebook', 'instagram', 'tiktok', 'linkedin', 'youtube']);
+const SOCIAL_CONNECTION_SERVICE_SLUGS = new Set([
+  'jobs_to_socials',
+  'content_engine',
+  'repeat_referral',
+  'entity_system',
+  'local_authority_engine',
+  'ai_audit',
+  'analytics_reporting',
+  'seo_gbp_audit',
+  'customer_intelligence',
+  'intelligence',
+]);
+const MONITORING_SOCIAL_CONNECTION_SERVICE_SLUGS = new Set([
+  'repeat_referral',
+  'entity_system',
+  'local_authority_engine',
+  'ai_audit',
+  'analytics_reporting',
+  'seo_gbp_audit',
+  'customer_intelligence',
+  'intelligence',
+]);
+const POSTING_SELECTION_SERVICE_SLUGS = new Set(['jobs_to_socials', 'content_engine']);
 
 function normalizeSelectedPlatforms(value, fallback = SOCIAL_PLATFORM_SLUGS) {
   if (!Array.isArray(value)) return fallback;
@@ -41,6 +65,13 @@ function normalizeSelectedPlatforms(value, fallback = SOCIAL_PLATFORM_SLUGS) {
     if (SOCIAL_PLATFORM_SET.has(platform) && !selected.includes(platform)) selected.push(platform);
   }
   return selected.length > 0 ? selected : fallback;
+}
+
+function hasAnyService(serviceSet, serviceSlugs) {
+  for (const slug of serviceSlugs) {
+    if (serviceSet.has(slug)) return true;
+  }
+  return false;
 }
 
 function dashboardHomeUrl() {
@@ -151,6 +182,15 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
 
   const base = supabaseUrl || SUPABASE_URL;
   const serviceSet = useMemo(() => new Set(services || []), [services]);
+  const powSetupRequired = serviceSet.has('jobs_to_socials');
+  const contentEngineSetupRequired = serviceSet.has('content_engine');
+  const socialMonitoringSetupRequired = hasAnyService(serviceSet, MONITORING_SOCIAL_CONNECTION_SERVICE_SLUGS);
+  const hasPostingSelectionService = hasAnyService(serviceSet, POSTING_SELECTION_SERVICE_SLUGS);
+  const platformSelectionProductLabel = powSetupRequired
+    ? 'PoW'
+    : contentEngineSetupRequired
+      ? 'Content Engine'
+      : 'posting';
   const nonPowServiceSlugs = useMemo(
     () => (services || []).map(String).filter(slug => slug && slug !== 'jobs_to_socials'),
     [services],
@@ -308,7 +348,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const togglePlatformUse = useCallback(async (platform, selected) => {
     const nextAction = selected ? 'remove_platform' : 'add_platform';
     if (selected && selectedPlatforms.length <= 1) {
-      setPlatformSelectionError('Keep at least one posting platform selected for PoW.');
+      setPlatformSelectionError(`Keep at least one posting platform selected for ${platformSelectionProductLabel}.`);
       return;
     }
     try {
@@ -334,7 +374,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           return next;
         });
       }
-      setPopupSuccess(`${selected ? 'Removed' : 'Added'} ${platform} ${selected ? 'from' : 'to'} PoW platform selection.`);
+      setPopupSuccess(`${selected ? 'Removed' : 'Added'} ${platform} ${selected ? 'from' : 'to'} ${platformSelectionProductLabel} platform selection.`);
       setTimeout(() => setPopupSuccess(null), 3000);
       refresh();
     } catch (err) {
@@ -343,7 +383,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     } finally {
       setPlatformSelectionBusy(null);
     }
-  }, [authHeaders, base, clientId, refresh, selectedPlatforms.length]);
+  }, [authHeaders, base, clientId, platformSelectionProductLabel, refresh, selectedPlatforms.length]);
 
   const connectSimple = useCallback(async (connectorType) => {
     setTokenBusy(b => ({ ...b, [connectorType]: true }));
@@ -546,21 +586,32 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       );
     })
     .map(platform => platform.label);
+  const contentEngineMissingSelectedPlatforms = selectedSocialRows
+    .filter(platform => CONTENT_ENGINE_SOCIAL_PLATFORM_SET.has(platform.platform))
+    .filter(platform => missingSelectedPlatforms.includes(platform.label))
+    .map(platform => platform.label);
   const photoSourceConnected = legacyPhotoSourceCount > 0 || allConnectors.some(connector => (
     connector?.is_active === true && PHOTO_SOURCE_CONNECTOR_TYPES.has(connector.connector_type)
   ));
   const crmConnected = CRM_PLATFORMS.some(crm => connectorMap[crm.connector_type]?.is_active === true);
-  const powSetupRequired = serviceSet.has('jobs_to_socials');
   const photoSourceRequired = powSetupRequired;
   const customerDataRequired = serviceSet.has('repeat_referral') || serviceSet.has('customer_intelligence');
   const hasSelectedServices = serviceSet.size > 0;
-  const showPowConnectionSections = !hasSelectedServices || powSetupRequired;
-  const showSocialPlatforms = showPowConnectionSections;
-  const showPhotoFeedSources = showPowConnectionSections;
+  const socialConnectionsEnabled = !hasSelectedServices || hasAnyService(serviceSet, SOCIAL_CONNECTION_SERVICE_SLUGS);
+  const postingSelectionRequired = hasPostingSelectionService && !socialMonitoringSetupRequired;
+  const showSocialPlatforms = socialConnectionsEnabled;
+  const showPhotoFeedSources = !hasSelectedServices || powSetupRequired || photoSourceConnected;
   const showCustomerDataSources = !hasSelectedServices || customerDataRequired;
   const showConnectChecks = showSocialPlatforms || showPhotoFeedSources || showCustomerDataSources;
+  const visibleSocialPlatforms = contentEngineSetupRequired && !powSetupRequired && !socialMonitoringSetupRequired
+    ? SOCIAL_PLATFORMS.filter(platform => CONTENT_ENGINE_SOCIAL_PLATFORM_SET.has(platform.platform))
+    : SOCIAL_PLATFORMS;
   const customerDataConnected = crmConnected || customerRecordCount > 0;
-  const gatedMissingSelectedPlatforms = powSetupRequired ? missingSelectedPlatforms : [];
+  const gatedMissingSelectedPlatforms = powSetupRequired
+    ? missingSelectedPlatforms
+    : contentEngineSetupRequired
+      ? contentEngineMissingSelectedPlatforms
+      : [];
   const photoSourceReady = !photoSourceRequired || photoSourceConnected;
   const customerDataReady = !customerDataRequired || customerDataConnected;
   const connectFlowReady = gatedMissingSelectedPlatforms.length === 0 && photoSourceReady && customerDataReady;
@@ -596,6 +647,8 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
         selected_platforms: cleanSelectedPlatforms,
         selected_platform_count: selectedPlatformCount,
         pow_setup_required: powSetupRequired,
+        content_engine_setup_required: contentEngineSetupRequired,
+        social_monitoring_setup_required: socialMonitoringSetupRequired,
         missing_selected_platforms: gatedMissingSelectedPlatforms,
         photo_source_required: photoSourceRequired,
         photo_source_connected: photoSourceConnected,
@@ -637,7 +690,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     } finally {
       setConnectFlowBusy(false);
     }
-  }, [authHeaders, base, clientId, selectedPlatforms, selectedPlatformCount, powSetupRequired, gatedMissingSelectedPlatforms, photoSourceRequired, photoSourceConnected, crmConnected, customerDataRequired, customerDataConnected, customerRecordCount, nonPowServiceSlugs.length]);
+  }, [authHeaders, base, clientId, selectedPlatforms, selectedPlatformCount, powSetupRequired, contentEngineSetupRequired, socialMonitoringSetupRequired, gatedMissingSelectedPlatforms, photoSourceRequired, photoSourceConnected, crmConnected, customerDataRequired, customerDataConnected, customerRecordCount, nonPowServiceSlugs.length]);
 
   if (!clientId) {
     return <div className={`sc-panel ${className}`}><div className="sc-error">No client ID linked yet. Complete onboarding first.</div></div>;
@@ -659,9 +712,19 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       {showSocialPlatforms && (
         <>
           <div className="sc-section-label">Social Platforms</div>
-          <p className="sc-subtitle">Connect the socials you actually use.</p>
+          <p className="sc-subtitle">
+            {socialMonitoringSetupRequired && !powSetupRequired && !contentEngineSetupRequired
+              ? 'Connect social and business profiles for audit, monitoring, and identity enrichment. This does not enable automated posting.'
+              : contentEngineSetupRequired && !powSetupRequired
+                ? 'Content Engine social delivery uses Facebook, Instagram, TikTok, LinkedIn, and YouTube. Articles use the Content Engine website publishing queue.'
+                : 'Connect the socials you actually use.'}
+          </p>
           <div className="sc-platform-selection-note">
-            Toggle off any social platform, Google Business Profile, or Website Gallery that you do not want to use or do not have. You can change this later by returning to Connect Platforms in the dashboard.
+            {socialMonitoringSetupRequired && !powSetupRequired && !contentEngineSetupRequired
+              ? 'Toggle on the profiles that should be checked for AI Audit, SEO & GBP Audit, Intelligence, or Local Authority monitoring. Toggle off any profile the business does not own.'
+              : contentEngineSetupRequired && !powSetupRequired
+                ? 'X, Google Business Profile, and Website Gallery are not Content Engine social destinations. Use PoW if you want job-photo GBP or website gallery output.'
+                : 'Toggle off any social platform, Google Business Profile, or Website Gallery that you do not want to use or do not have. You can change this later by returning to Connect Platforms in the dashboard.'}
           </div>
           <div className="sc-auth-reminder">
             <strong>Facebook & LinkedIn page access:</strong> Open <strong>dashboard.scalesmall.ai</strong> or <strong>connect.scalesmall.ai</strong> in an incognito window or Chrome profile where the page admin account is signed in. Then sign in to Scale Small AI with the normal dashboard login, click Connect, and use the Facebook or LinkedIn popup with the account that manages the business/company page.
@@ -669,10 +732,12 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           </div>
           {platformSelectionError && <div ref={errorRef} className="sc-row-error" style={{ marginBottom: 12 }}>{platformSelectionError}</div>}
           <div className="sc-list">
-            {SOCIAL_PLATFORMS.map(p => {
-          const enabled = p.platform === 'website' || serviceSet.size === 0 || serviceSet.has('jobs_to_socials') || serviceSet.has('repeat_referral') || serviceSet.has('entity_system');
+            {visibleSocialPlatforms.map(p => {
+                const enabled = socialConnectionsEnabled || p.platform === 'website';
                 const status = platformMap[p.platform];
-                const selectedForPow = selectedPlatformSet.has(p.platform) && status?.selected !== false;
+                const selectedForPosting = selectedPlatformSet.has(p.platform) && status?.selected !== false;
+                const selectedForConnection = !postingSelectionRequired || selectedForPosting;
+                const monitorOnly = socialMonitoringSetupRequired && !powSetupRequired && !contentEngineSetupRequired && !customerDataRequired;
                 const connected = status?.connected === true;
                 const expired = status?.is_expired === true;
                 const details = status?.details || {};
@@ -683,8 +748,10 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                 let note;
           if (!enabled) {
             note = 'Not enabled for this account';
-          } else if (!selectedForPow) {
-            note = powSetupRequired ? 'Not selected for PoW posting' : 'Not selected right now';
+          } else if (!selectedForPosting && postingSelectionRequired) {
+            note = powSetupRequired ? 'Not selected for PoW posting' : 'Not selected for Content Engine delivery';
+          } else if (!selectedForPosting) {
+            note = 'Not selected for posting; connection is still available for monitoring';
           } else if (instagramBlocked) {
             note = 'Connect Facebook first';
           } else if (p.platform === 'tiktok' && status?.details?.needs_refresh) {
@@ -720,37 +787,39 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                 <BrandIcon icon={p.icon} />
                 <div className="sc-info">
                   <div className="sc-name">{p.label}</div>
-                  {focused && <div className="sc-note">Required for PoW live testing</div>}
+                  {focused && <div className="sc-note">Required for live testing</div>}
                   {note && <div className="sc-note">{note}</div>}
                 </div>
                 <div className="sc-actions">
                   <label
-                    className={`sc-platform-toggle ${selectedForPow ? 'is-on' : 'is-off'}`}
-                    title={powSetupRequired
-                      ? selectedForPow ? 'This platform is included in PoW posting' : 'This platform will not be checked or used for PoW posting'
-                      : selectedForPow ? 'This platform is saved as selected for future posting use' : 'This platform is not selected right now'}
+                    className={`sc-platform-toggle ${selectedForPosting ? 'is-on' : 'is-off'}`}
+                    title={postingSelectionRequired
+                      ? selectedForPosting ? 'This platform is included for posting' : 'This platform will not be used for posting'
+                      : monitorOnly
+                        ? selectedForPosting ? 'This platform is included in monitoring and enrichment' : 'This platform is not checked for monitoring or enrichment'
+                        : selectedForPosting ? 'This platform is saved as selected for future posting use' : 'This platform is not selected right now'}
                   >
                     <input
                       type="checkbox"
-                      checked={selectedForPow}
-                      onChange={() => togglePlatformUse(p.platform, selectedForPow)}
+                      checked={selectedForPosting}
+                      onChange={() => togglePlatformUse(p.platform, selectedForPosting)}
                       disabled={!enabled || platformSelectionBusy === p.platform}
                     />
                     <span>
                       {platformSelectionBusy === p.platform
                         ? 'Saving...'
-                        : selectedForPow
-                          ? powSetupRequired ? 'Use for PoW' : 'Selected'
-                          : powSetupRequired ? 'Off for PoW' : 'Off'}
+                        : selectedForPosting
+                          ? powSetupRequired ? 'Use for PoW' : contentEngineSetupRequired ? 'Use for CE' : monitorOnly ? 'Monitor' : 'Selected'
+                          : powSetupRequired ? 'Off for PoW' : contentEngineSetupRequired ? 'Off for CE' : monitorOnly ? 'Do not monitor' : 'Off'}
                     </span>
                   </label>
                   <RowBadge
                     connected={connected}
                     expired={expired}
-                    disabled={!enabled || !selectedForPow}
+                    disabled={!enabled || !selectedForConnection}
                     connStatus={p.platform === 'linkedin' && !connected && Array.isArray(details.available_orgs) && details.available_orgs.length > 0 ? 'needs_designator' : undefined}
                   />
-                  {enabled && selectedForPow && !instagramBlocked && (
+                  {enabled && selectedForConnection && !instagramBlocked && (
                     isWebsite ? (
                       <button className="sc-btn sc-btn-ghost" onClick={() => setEmbedVisible(v => !v)}>
                         {embedVisible ? 'Hide code' : 'Get embed code'}
@@ -833,7 +902,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                 </div>
               )}
               {p.platform === 'linkedin' && details.needs_org_selection && (
-                <div className="sc-note">LinkedIn PoW posts go to a company page. Reconnect with company-page permissions, then choose the page here.</div>
+                <div className="sc-note">LinkedIn publishing goes to a company page. Reconnect with company-page permissions, then choose the page here.</div>
               )}
               {p.platform === 'tiktok' && details.bridge_ready && !details.direct_ready && (
                 <div className="sc-note">Using UploadPost bridge. Direct TikTok will be ready after app approval and reconnect.</div>
@@ -1123,10 +1192,10 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           {showConnectChecks && (
             <div className="sc-connect-checks">
               {showSocialPlatforms && (
-                <span className={`sc-badge ${powSetupRequired ? (gatedMissingSelectedPlatforms.length === 0 ? 'sc-badge-green' : 'sc-badge-amber') : 'sc-badge-off'}`}>
-                  {powSetupRequired
+                <span className={`sc-badge ${(powSetupRequired || contentEngineSetupRequired) ? (gatedMissingSelectedPlatforms.length === 0 ? 'sc-badge-green' : 'sc-badge-amber') : 'sc-badge-off'}`}>
+                  {powSetupRequired || contentEngineSetupRequired
                     ? gatedMissingSelectedPlatforms.length === 0
-                      ? 'Selected platforms ready'
+                      ? 'Publishing platforms ready'
                       : `${gatedMissingSelectedPlatforms.length} platform${gatedMissingSelectedPlatforms.length === 1 ? '' : 's'} need attention`
                     : 'Posting platforms optional'}
                 </span>
