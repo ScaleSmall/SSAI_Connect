@@ -1,3 +1,4 @@
 /privacy    /privacy/index.html   200
 /data-deletion    /data-deletion/index.html   200
+/auth/tiktok/callback    https://oyyfpkpzalhxztpcdjgq.supabase.co/functions/v1/oauth-callback   302
 /*    /index.html   200
