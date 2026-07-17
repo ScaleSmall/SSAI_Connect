@@ -19,10 +19,12 @@ function excludesAll(source, needles, label) {
 }
 
 const app = await load('src/App.jsx');
+const header = await load('src/components/Header.jsx');
 const connectPanel = await load('src/components/shared/ConnectPanel.jsx');
 const connectStyles = await load('src/components/shared/connect.css');
 const icons = await load('src/lib/icons.js');
 const oauthComplete = await load('src/OAuthCompletePage.jsx');
+const oauthFlow = await load('src/oauthFlow.js');
 const supabaseConfig = await load('src/supabase.js');
 const packageSource = await load('package.json');
 const envVerifier = await load('scripts/verify-connect-env.mjs');
@@ -31,9 +33,13 @@ const workflowVerifier = await load('scripts/verify-workflows.mjs');
 includesAll(app, [
   "import { Toast } from 'ssai-shared'",
   "import { ConnectPanel } from './components/shared/ConnectPanel'",
+  "import { activeServiceSlugs } from './serviceEntitlements'",
   "window.location.pathname === '/oauth-complete'",
   '<OAuthCompletePage />',
   'getToken={getToken}',
+  ".from('client_services')",
+  ".select('service_slug,status,active_until')",
+  'activeServiceSlugs(entitlementRows)',
 ], 'SSAI_Connect app contract');
 
 excludesAll(app, [
@@ -41,7 +47,20 @@ excludesAll(app, [
   '<SubscriptionBanner',
   'admin_type',
   'allowPublisherProxyConfig={isAdmin}',
+  'OnboardingWizard',
+  "from('client_profiles')",
+  'services_enabled',
+  '/functions/v1/stripe-checkout',
 ], 'SSAI_Connect subscription banner removal contract');
+
+includesAll(header, [
+  'src="/images/logo-140.webp"',
+  'alt="SCALE SMALL.AI"',
+], 'SSAI_Connect bundled logo contract');
+
+excludesAll(header, [
+  'https://scalesmall.ai/logo.png',
+], 'SSAI_Connect external logo dependency contract');
 
 includesAll(connectPanel, [
   "source_type: 'manual_photo_upload'",
@@ -71,6 +90,8 @@ includesAll(connectPanel, [
   'const showCustomerDataSources = !hasSelectedServices || customerDataRequired',
   'Content Engine social delivery uses Facebook, Instagram, TikTok, LinkedIn, and YouTube',
   'Publishing platforms ready',
+  "window.open('about:blank'",
+  'popup.opener = null',
   '{showSocialPlatforms && (',
   '{showPhotoFeedSources && (',
   '{showCustomerDataSources && (',
@@ -104,12 +125,36 @@ includesAll(connectStyles, [
 ], 'SSAI_Connect dashboard icon size CSS contract');
 
 includesAll(oauthComplete, [
-  "postMessage",
-  "oauth-success",
-  "oauth-error",
-  "window.location.origin",
+  "BroadcastChannel",
+  "parseOAuthCompletion",
+  "completion.message",
   "window.close()",
+  '[OAuthCompletePage] OAuth completion relay was unavailable',
 ], 'SSAI_Connect OAuth completion contract');
+
+excludesAll(oauthComplete, [
+  'catch {}',
+], 'SSAI_Connect observable OAuth completion failure contract');
+
+excludesAll(oauthComplete, [
+  "window.opener",
+], 'SSAI_Connect OAuth opener trust contract');
+
+includesAll(oauthFlow, [
+  'isValidOAuthRequestId',
+  'buildOAuthStartUrl',
+  'parseOAuthCompletion',
+  'isTrustedOAuthRelayMessage',
+  'Unsupported OAuth platform',
+  'OAuth API must use HTTPS',
+  "type: 'oauth-success'",
+  "type: 'oauth-error'",
+], 'SSAI_Connect executable OAuth flow contract');
+
+excludesAll(oauthFlow, [
+  "params.get('oauth_error') ||",
+  'error: params.get',
+], 'SSAI_Connect raw OAuth error disclosure contract');
 
 includesAll(supabaseConfig, [
   'import.meta.env.VITE_SUPABASE_URL',

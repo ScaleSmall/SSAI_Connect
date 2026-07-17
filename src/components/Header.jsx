@@ -5,7 +5,7 @@ export default function Header({ user, onLogout }) {
     <header className="header">
       <div className="header-inner">
         <a className="logo-group" href="https://scalesmall.ai">
-          <img src="https://scalesmall.ai/logo.png" alt="SCALE SMALL.AI" width="48" height="48" />
+          <img src="/images/logo-140.webp" alt="SCALE SMALL.AI" width="48" height="48" />
           <div className="logo-text">
             <div className="logo-brand">
               <span className="w1">SCALE</span>

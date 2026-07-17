@@ -1,31 +1,29 @@
 import React, { useEffect, useState } from 'react';
+import { oauthRelayChannelName, parseOAuthCompletion } from './oauthFlow';
 
 export default function OAuthCompletePage() {
   const [platform, setPlatform] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const connected = params.get('connected') || '';
-    const error = params.get('oauth_error') || '';
-    const errorPlatform = params.get('platform') || '';
+    const completion = parseOAuthCompletion(window.location.search, window.location.origin);
+    const requestId = completion?.requestId || '';
 
-    setPlatform(connected || errorPlatform);
-    if (error) setErrorMsg(decodeURIComponent(error));
+    setPlatform(completion?.platform || '');
+    if (completion?.failed) setErrorMsg('Connection could not be completed. Please try again.');
 
-    if (window.opener) {
+    if (requestId && typeof BroadcastChannel !== 'undefined') {
       try {
-        window.opener.postMessage(
-          connected
-            ? { type: 'oauth-success', platform: connected }
-            : { type: 'oauth-error', platform: errorPlatform, error },
-          window.location.origin,
-        );
-      } catch {}
+        const channel = new BroadcastChannel(oauthRelayChannelName(requestId));
+        channel.postMessage(completion.message);
+        channel.close();
+      } catch {
+        console.warn('[OAuthCompletePage] OAuth completion relay was unavailable');
+      }
     }
 
     const timer = setTimeout(() => {
-      try { window.close(); } catch {}
+      window.close();
     }, 800);
 
     return () => clearTimeout(timer);
