@@ -128,6 +128,9 @@ includesAll(oauthComplete, [
   "BroadcastChannel",
   "parseOAuthCompletion",
   "completion.message",
+  "parseFrozenTikTokCompletion",
+  "else if (frozenTikTokCompletion && window.opener)",
+  "window.opener.postMessage(frozenTikTokCompletion.message, window.location.origin)",
   "window.close()",
   '[OAuthCompletePage] OAuth completion relay was unavailable',
 ], 'SSAI_Connect OAuth completion contract');
@@ -136,14 +139,18 @@ excludesAll(oauthComplete, [
   'catch {}',
 ], 'SSAI_Connect observable OAuth completion failure contract');
 
-excludesAll(oauthComplete, [
-  "window.opener",
-], 'SSAI_Connect OAuth opener trust contract');
+assert.equal(
+  (oauthComplete.match(/window\.opener/g) ?? []).length,
+  2,
+  'SSAI_Connect opener relay must remain limited to the frozen TikTok compatibility path',
+);
 
 includesAll(oauthFlow, [
   'isValidOAuthRequestId',
   'buildOAuthStartUrl',
+  'buildFrozenTikTokOAuthStartUrl',
   'parseOAuthCompletion',
+  'parseFrozenTikTokCompletion',
   'isTrustedOAuthRelayMessage',
   'Unsupported OAuth platform',
   'OAuth API must use HTTPS',

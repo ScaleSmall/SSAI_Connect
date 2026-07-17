@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { BRAND_ICON_STYLE, iconFor } from '../../lib/icons';
-import { buildOAuthStartUrl, isTrustedOAuthRelayMessage, oauthRelayChannelName } from '../../oauthFlow';
+import { buildFrozenTikTokOAuthStartUrl, buildOAuthStartUrl, isTrustedOAuthRelayMessage, oauthRelayChannelName } from '../../oauthFlow';
 import './connect.css';
 import './connect-flow.css';
 
@@ -261,10 +261,59 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
 
   useEffect(() => { fetchStatuses(); }, [fetchStatuses, refreshTick]);
 
+  useEffect(() => {
+    const onFrozenTikTokMessage = (event) => {
+      if (event.origin !== window.location.origin || event.data?.platform !== 'tiktok') return;
+      if (event.data?.type === 'oauth-success') {
+        setPopupError(null);
+        refresh();
+      } else if (event.data?.type === 'oauth-error') {
+        setPopupError('Failed to connect tiktok. Please try again.');
+      }
+    };
+    window.addEventListener('message', onFrozenTikTokMessage);
+    return () => window.removeEventListener('message', onFrozenTikTokMessage);
+  }, [refresh]);
+
   useEffect(() => () => clearPopupRelay(), [clearPopupRelay]);
 
   const openPopup = useCallback(async (requestedPlatform) => {
     if (!clientId) return;
+    if (requestedPlatform === 'tiktok') {
+      setBusy(true);
+      setPopupError(null);
+      const popup = window.open('', 'oauth_popup', 'popup,width=600,height=700,noopener=no');
+      if (!popup) {
+        setPopupError('Popup blocked. Please allow popups for this site and try again.');
+        setBusy(false);
+        return;
+      }
+      try {
+        const headers = await authHeaders();
+        const url = buildFrozenTikTokOAuthStartUrl({
+          baseUrl: base,
+          clientId,
+          origin: window.location.origin,
+        });
+        const res = await fetch(url, { headers: { ...headers, Accept: 'application/json' } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.auth_url) throw new Error(data.error || `Could not start OAuth (${res.status})`);
+        popup.location.href = data.auth_url;
+        const timer = setInterval(() => {
+          if (popup.closed) {
+            clearInterval(timer);
+            refresh();
+          }
+        }, 800);
+        setTimeout(() => clearInterval(timer), 5 * 60 * 1000);
+      } catch (err) {
+        popup.close();
+        setPopupError(err.message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     clearPopupRelay();
     setBusy(true);
     setPopupError(null);

@@ -50,6 +50,31 @@ export function buildOAuthStartUrl({ baseUrl, requestedPlatform, clientId, origi
   return new URL(`/functions/v1/oauth-start?${params.toString()}`, base.origin).toString();
 }
 
+// TikTok's approved connection path is intentionally frozen while platform
+// elevation is pending. Keep its pre-existing request and callback contract
+// separate from the hardened relay used by every other provider.
+export function buildFrozenTikTokOAuthStartUrl({ baseUrl, clientId, origin }) {
+  const tenant = String(clientId || '').trim();
+  if (!CLIENT_ID_PATTERN.test(tenant)) throw new Error('Invalid client identifier');
+
+  const base = new URL(baseUrl);
+  if (base.protocol !== 'https:') throw new Error('OAuth API must use HTTPS');
+
+  const returnOrigin = new URL(origin);
+  if (returnOrigin.origin !== origin) throw new Error('Invalid Connect origin');
+  if (returnOrigin.protocol !== 'https:' && returnOrigin.hostname !== 'localhost' && returnOrigin.hostname !== '127.0.0.1') {
+    throw new Error('OAuth return origin must use HTTPS');
+  }
+
+  const params = new URLSearchParams({
+    platform: 'tiktok',
+    client_id: tenant,
+    return_to: new URL('/oauth-complete', returnOrigin.origin).toString(),
+    format: 'json',
+  });
+  return new URL(`/functions/v1/oauth-start?${params.toString()}`, base.origin).toString();
+}
+
 export function parseOAuthCompletion(search, origin) {
   const params = new URLSearchParams(search);
   const requestId = String(params.get('oauth_request_id') || '').trim();
@@ -79,6 +104,22 @@ export function parseOAuthCompletion(search, origin) {
           source: 'oauth-complete',
           origin,
         },
+  };
+}
+
+export function parseFrozenTikTokCompletion(search) {
+  const params = new URLSearchParams(search);
+  const connected = String(params.get('connected') || '').trim().toLowerCase();
+  const errorPlatform = String(params.get('platform') || '').trim().toLowerCase();
+  if (connected !== 'tiktok' && errorPlatform !== 'tiktok') return null;
+
+  const error = String(params.get('oauth_error') ?? '');
+  return {
+    platform: 'tiktok',
+    failed: Boolean(error) || connected !== 'tiktok',
+    message: connected === 'tiktok' && !error
+      ? { type: 'oauth-success', platform: 'tiktok' }
+      : { type: 'oauth-error', platform: 'tiktok', error },
   };
 }
 

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildFrozenTikTokOAuthStartUrl,
   buildOAuthStartUrl,
   isTrustedOAuthRelayMessage,
   isValidOAuthRequestId,
   oauthRelayChannelName,
+  parseFrozenTikTokCompletion,
   parseOAuthCompletion,
 } from '../src/oauthFlow.js';
 
@@ -38,6 +40,26 @@ test('GBP uses the Google OAuth provider with an exact GBP product request', () 
   }));
   assert.equal(url.searchParams.get('platform'), 'google');
   assert.equal(url.searchParams.get('google_product'), 'gbp');
+});
+
+test('TikTok retains the approved pre-elevation OAuth request and callback contract', () => {
+  const url = new URL(buildFrozenTikTokOAuthStartUrl({
+    baseUrl: 'https://project.supabase.co',
+    clientId: 'client_tiktok',
+    origin: ORIGIN,
+  }));
+  assert.equal(url.searchParams.get('platform'), 'tiktok');
+  assert.equal(url.searchParams.get('client_id'), 'client_tiktok');
+  assert.equal(url.searchParams.get('format'), 'json');
+  assert.equal(url.searchParams.get('return_to'), `${ORIGIN}/oauth-complete`);
+  assert.equal(url.searchParams.has('oauth_request_id'), false);
+
+  assert.deepEqual(parseFrozenTikTokCompletion('?connected=tiktok'), {
+    platform: 'tiktok',
+    failed: false,
+    message: { type: 'oauth-success', platform: 'tiktok' },
+  });
+  assert.equal(parseFrozenTikTokCompletion('?connected=facebook'), null);
 });
 
 test('OAuth start rejects unknown platforms, unsafe API URLs, malformed tenants, and bad request IDs', () => {
