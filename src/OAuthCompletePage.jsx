@@ -1,31 +1,38 @@
 import React, { useEffect, useState } from 'react';
+import { oauthRelayChannelName, parseFrozenTikTokCompletion, parseOAuthCompletion } from './oauthFlow';
 
 export default function OAuthCompletePage() {
   const [platform, setPlatform] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const connected = params.get('connected') || '';
-    const error = params.get('oauth_error') || '';
-    const errorPlatform = params.get('platform') || '';
+    const completion = parseOAuthCompletion(window.location.search, window.location.origin);
+    const frozenTikTokCompletion = completion ? null : parseFrozenTikTokCompletion(window.location.search);
+    const requestId = completion?.requestId || '';
 
-    setPlatform(connected || errorPlatform);
-    if (error) setErrorMsg(decodeURIComponent(error));
+    setPlatform(completion?.platform || frozenTikTokCompletion?.platform || '');
+    if (completion?.failed || frozenTikTokCompletion?.failed) {
+      setErrorMsg(frozenTikTokCompletion?.message?.error || 'Connection could not be completed. Please try again.');
+    }
 
-    if (window.opener) {
+    if (requestId && typeof BroadcastChannel !== 'undefined') {
       try {
-        window.opener.postMessage(
-          connected
-            ? { type: 'oauth-success', platform: connected }
-            : { type: 'oauth-error', platform: errorPlatform, error },
-          window.location.origin,
-        );
-      } catch {}
+        const channel = new BroadcastChannel(oauthRelayChannelName(requestId));
+        channel.postMessage(completion.message);
+        channel.close();
+      } catch {
+        console.warn('[OAuthCompletePage] OAuth completion relay was unavailable');
+      }
+    } else if (frozenTikTokCompletion && window.opener) {
+      try {
+        window.opener.postMessage(frozenTikTokCompletion.message, window.location.origin);
+      } catch {
+        console.warn('[OAuthCompletePage] TikTok completion relay was unavailable');
+      }
     }
 
     const timer = setTimeout(() => {
-      try { window.close(); } catch {}
+      window.close();
     }, 800);
 
     return () => clearTimeout(timer);

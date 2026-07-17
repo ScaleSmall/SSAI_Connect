@@ -5,9 +5,9 @@ import { ConnectPanel } from './components/shared/ConnectPanel';
 import Header from './components/Header';
 import LoginForm from './components/LoginForm';
 import Footer from './components/Footer';
-import OnboardingWizard from './components/OnboardingWizard';
 import OAuthCompletePage from './OAuthCompletePage';
 import RRPublicRedirect from './RRPublicRedirect';
+import { activeServiceSlugs } from './serviceEntitlements';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -16,8 +16,6 @@ export default function App() {
   const [services, setServices] = useState([]);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
-  const [showWizard, setShowWizard] = useState(false);
-  const [wizardDismissed, setWizardDismissed] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setAuthLoading(false); });
@@ -33,7 +31,7 @@ export default function App() {
     async function fetchUser() {
       const { data, error: err } = await supabase
         .from('users')
-        .select('id, email, business_name, n8n_client_id, subscription_status, customer_id')
+        .select('id, email, business_name, n8n_client_id')
         .eq('id', session.user.id)
         .single();
       if (err || !data) { setError('Could not find your account. Contact support.'); return; }
@@ -41,21 +39,16 @@ export default function App() {
       setUser(data);
       setError(null);
 
-      const { data: cp } = await supabase
-        .from('client_profiles')
-        .select('services_enabled, setup_completed_at')
-        .eq('client_id', data.n8n_client_id)
-        .single();
-      setServices(cp?.services_enabled || []);
-
-      // Show wizard for new users (no services + no subscription + not completed before)
-      const { count: svcCount } = await supabase
+      const { data: entitlementRows, error: entitlementError } = await supabase
         .from('client_services')
-        .select('id', { count: 'exact', head: true })
+        .select('service_slug,status,active_until')
         .eq('client_id', data.n8n_client_id);
-
-      const isNew = !cp?.setup_completed_at && (!svcCount || svcCount === 0) && !data.subscription_status;
-      setShowWizard(isNew);
+      if (entitlementError) {
+        setServices([]);
+        setError('Could not load your active services. Please refresh or contact support.');
+        return;
+      }
+      setServices(activeServiceSlugs(entitlementRows));
     }
     fetchUser();
   }, [session]);
@@ -73,7 +66,6 @@ export default function App() {
     }
     if (params.get('billing') === 'success') {
       setToast('✓ Subscription activated! Your services are now running.');
-      setShowWizard(false);
     }
     if (params.get('status') || params.get('billing')) {
       const url = new URL(window.location);
@@ -85,16 +77,6 @@ export default function App() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setSession(null); setUser(null);
-  };
-
-  const handleWizardComplete = async () => {
-    setShowWizard(false);
-    setWizardDismissed(true);
-    if (user?.n8n_client_id) {
-      await supabase.from('client_profiles')
-        .update({ setup_completed_at: new Date().toISOString() })
-        .eq('client_id', user.n8n_client_id);
-    }
   };
 
   if (window.location.pathname === '/oauth-complete') return <OAuthCompletePage />;
@@ -116,19 +98,6 @@ export default function App() {
             ? (<><h1>Connect Your Platforms</h1><div className="error-box">{error}</div></>)
             : (<div className="loading"><div className="spinner" />Loading platform status…</div>)}
         </main><Footer /></>
-    );
-  }
-
-  if (showWizard && !wizardDismissed) {
-    return (
-      <>
-        <Header user={user} onLogout={handleLogout} />
-        <main className="main-content">
-          <OnboardingWizard user={user} supabase={supabase} services={services} getToken={getToken} onComplete={handleWizardComplete} />
-        </main>
-        <Footer />
-        {toast && <Toast message={toast} onDone={() => setToast(null)} />}
-      </>
     );
   }
 

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { BRAND_ICON_STYLE, iconFor } from '../../lib/icons';
+import { buildFrozenTikTokOAuthStartUrl, buildOAuthStartUrl, isTrustedOAuthRelayMessage, oauthRelayChannelName } from '../../oauthFlow';
 import './connect.css';
 import './connect-flow.css';
 
@@ -105,10 +106,6 @@ function linkedInOrgLabel(org, index) {
   return name || `Company page ${index + 1}`;
 }
 
-function oauthPlatformFor(platform) {
-  return platform === 'gbp' ? 'google' : platform;
-}
-
 function PageAccessModal({ onClose }) {
   return (
     <div className="sc-modal-backdrop" role="presentation" onClick={onClose}>
@@ -136,7 +133,7 @@ function PageAccessModal({ onClose }) {
   );
 }
 
-export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [], getToken, className = '', allowPublisherProxyConfig = false, focusPlatforms = [] }) {
+export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [], getToken, className = '', focusPlatforms = [] }) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [popupError, setPopupError] = useState(null);
@@ -155,14 +152,6 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const [tokenBusy, setTokenBusy] = useState({});
   const [embedVisible, setEmbedVisible] = useState(false);
   const [embedCopied, setEmbedCopied] = useState(false);
-  const [hasUploadPostKey, setHasUploadPostKey] = useState(false);
-  const [hasUploadPostUser, setHasUploadPostUser] = useState(false);
-  const [hasUploadPostReady, setHasUploadPostReady] = useState(false);
-  const [uploadPostInput, setUploadPostInput] = useState('');
-  const [uploadPostUserInput, setUploadPostUserInput] = useState('');
-  const [showUploadPostForm, setShowUploadPostForm] = useState(false);
-  const [uploadPostBusy, setUploadPostBusy] = useState(false);
-  const [uploadPostError, setUploadPostError] = useState(null);
   const [selectionInputs, setSelectionInputs] = useState({});
   const [selectionBusy, setSelectionBusy] = useState(null);
   const [selectionError, setSelectionError] = useState(null);
@@ -179,6 +168,10 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const [customerRecordCount, setCustomerRecordCount] = useState(0);
   const fileInputRef = React.useRef(null);
   const photoFileInputRef = React.useRef(null);
+  const popupRef = React.useRef(null);
+  const popupRequestRef = React.useRef(null);
+  const popupChannelRef = React.useRef(null);
+  const popupCloseTimerRef = React.useRef(null);
 
   const base = supabaseUrl || SUPABASE_URL;
   const serviceSet = useMemo(() => new Set(services || []), [services]);
@@ -198,6 +191,19 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const focusPlatformSet = useMemo(() => new Set(focusPlatforms || []), [focusPlatforms]);
   const selectedPlatformSet = useMemo(() => new Set(selectedPlatforms || []), [selectedPlatforms]);
   const refresh = useCallback(() => setRefreshTick(t => t + 1), []);
+
+  const clearPopupRelay = useCallback(() => {
+    if (popupCloseTimerRef.current) {
+      clearInterval(popupCloseTimerRef.current);
+      popupCloseTimerRef.current = null;
+    }
+    if (popupChannelRef.current) {
+      popupChannelRef.current.close();
+      popupChannelRef.current = null;
+    }
+    popupRequestRef.current = null;
+    popupRef.current = null;
+  }, []);
 
   const authHeaders = useCallback(async () => {
     const token = getToken ? await getToken() : null;
@@ -232,9 +238,6 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
         if (Array.isArray(pData.selected_platforms)) {
           setSelectedPlatforms(normalizeSelectedPlatforms(pData.selected_platforms));
         }
-        setHasUploadPostKey(!!pData.has_upload_post_key);
-        setHasUploadPostUser(!!pData.has_upload_post_user);
-        setHasUploadPostReady(!!pData.has_upload_post_ready);
       }
       if (cRes.status === 'fulfilled' && cRes.value.ok) {
         const cData = await cRes.value.json();
@@ -259,67 +262,119 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   useEffect(() => { fetchStatuses(); }, [fetchStatuses, refreshTick]);
 
   useEffect(() => {
-    const onMessage = (event) => {
-      const allowed = [
-        'https://connect.scalesmall.ai',
-        'https://dashboard.scalesmall.ai',
-        window.location.origin,
-        'http://localhost:5173',
-        'http://localhost:5174',
-        'http://localhost:4173',
-      ];
-      if (!allowed.some(origin => event.origin.startsWith(origin))) return;
+    const onFrozenTikTokMessage = (event) => {
+      if (event.origin !== window.location.origin || event.data?.platform !== 'tiktok') return;
       if (event.data?.type === 'oauth-success') {
         setPopupError(null);
         refresh();
-      }
-      if (event.data?.type === 'oauth-error') {
-        setPopupError(`Failed to connect ${event.data.platform || 'platform'}. Please try again.`);
+      } else if (event.data?.type === 'oauth-error') {
+        setPopupError('Failed to connect tiktok. Please try again.');
       }
     };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    window.addEventListener('message', onFrozenTikTokMessage);
+    return () => window.removeEventListener('message', onFrozenTikTokMessage);
   }, [refresh]);
+
+  useEffect(() => () => clearPopupRelay(), [clearPopupRelay]);
 
   const openPopup = useCallback(async (requestedPlatform) => {
     if (!clientId) return;
+    if (requestedPlatform === 'tiktok') {
+      setBusy(true);
+      setPopupError(null);
+      const popup = window.open('', 'oauth_popup', 'popup,width=600,height=700,noopener=no');
+      if (!popup) {
+        setPopupError('Popup blocked. Please allow popups for this site and try again.');
+        setBusy(false);
+        return;
+      }
+      try {
+        const headers = await authHeaders();
+        const url = buildFrozenTikTokOAuthStartUrl({
+          baseUrl: base,
+          clientId,
+          origin: window.location.origin,
+        });
+        const res = await fetch(url, { headers: { ...headers, Accept: 'application/json' } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.auth_url) throw new Error(data.error || `Could not start OAuth (${res.status})`);
+        popup.location.href = data.auth_url;
+        const timer = setInterval(() => {
+          if (popup.closed) {
+            clearInterval(timer);
+            refresh();
+          }
+        }, 800);
+        setTimeout(() => clearInterval(timer), 5 * 60 * 1000);
+      } catch (err) {
+        popup.close();
+        setPopupError(err.message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    clearPopupRelay();
     setBusy(true);
     setPopupError(null);
-    const popup = window.open('', 'oauth_popup', 'popup,width=600,height=700,noopener=no');
+    const requestId = crypto.randomUUID();
+    const popup = window.open('about:blank', `oauth_popup_${requestId}`, 'popup,width=600,height=700');
     if (!popup) {
       setPopupError('Popup blocked. Please allow popups for this site and try again.');
       setBusy(false);
       return;
     }
+    popup.opener = null;
+    popupRef.current = popup;
+    popupRequestRef.current = requestId;
     try {
-      // return_to points to /oauth-complete on this app — that page posts a message
-      // back to this window and closes itself, so the user never sees an external page.
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel(oauthRelayChannelName(requestId));
+        channel.onmessage = (event) => {
+          const payload = event?.data;
+          if (popupRequestRef.current !== requestId) return;
+          if (!isTrustedOAuthRelayMessage(payload, { requestId, origin: window.location.origin })) return;
+          if (payload.type === 'oauth-success') {
+            setPopupError(null);
+            refresh();
+          } else if (payload.type === 'oauth-error') {
+            setPopupError(`Failed to connect ${payload.platform || 'platform'}. Please try again.`);
+          }
+          clearPopupRelay();
+        };
+        popupChannelRef.current = channel;
+      }
       const headers = await authHeaders();
-      const oauthPlatform = oauthPlatformFor(requestedPlatform);
-      const params = new URLSearchParams({
-        platform: oauthPlatform,
-        client_id: clientId,
-        return_to: `${window.location.origin}/oauth-complete`,
-        format: 'json',
+      const url = buildOAuthStartUrl({
+        baseUrl: base,
+        requestedPlatform,
+        clientId,
+        origin: window.location.origin,
+        requestId,
       });
-      if (requestedPlatform === 'gbp') params.set('google_product', 'gbp');
-      const url = `${base}/functions/v1/oauth-start?${params.toString()}`;
       const res = await fetch(url, { headers: { ...headers, Accept: 'application/json' } });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.auth_url) throw new Error(data.error || `Could not start OAuth (${res.status})`);
       popup.location.href = data.auth_url;
-      // Fallback: if the message never arrives, refresh when the popup closes
-      const timer = setInterval(() => {
-        if (popup.closed) { clearInterval(timer); refresh(); }
+      popupCloseTimerRef.current = setInterval(() => {
+        if (!popup.closed) return;
+        clearPopupRelay();
+        refresh();
       }, 800);
-      setTimeout(() => clearInterval(timer), 5 * 60 * 1000);
+      setTimeout(() => {
+        if (popupCloseTimerRef.current) {
+          clearInterval(popupCloseTimerRef.current);
+          popupCloseTimerRef.current = null;
+        }
+      }, 5 * 60 * 1000);
     } catch (err) {
       popup.close();
+      clearPopupRelay();
       setPopupError(err.message);
     } finally {
       setBusy(false);
     }
-  }, [clientId, base, authHeaders, refresh]);
+  }, [authHeaders, base, clearPopupRelay, clientId, refresh]);
 
   const disconnectPlatform = useCallback(async (platform) => {
     try {
@@ -454,33 +509,6 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       setDisconnectingKey(null);
     }
   }, [clientId, base, authHeaders, refresh]);
-
-  const saveUploadPostKey = useCallback(async (clear = false) => {
-    const key = clear ? '' : uploadPostInput.trim();
-    const uploadPostUser = clear ? '' : uploadPostUserInput.trim();
-    if (!clear && !key) { setUploadPostError('Enter your UploadPost API key'); return; }
-    if (!clear && !uploadPostUser) { setUploadPostError('Enter your UploadPost user/account'); return; }
-    setUploadPostBusy(true);
-    setUploadPostError(null);
-    try {
-      const headers = await authHeaders();
-      const res = await fetch(`${base}/functions/v1/oauth-status`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ client_id: clientId, action: 'set_upload_post_key', api_key: key, upload_post_user: uploadPostUser, request_id: crypto.randomUUID() }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `Failed to save (${res.status})`);
-      setUploadPostInput('');
-      setUploadPostUserInput('');
-      setShowUploadPostForm(false);
-      refresh();
-    } catch (err) {
-      setUploadPostError(err.message || 'Failed to save key');
-    } finally {
-      setUploadPostBusy(false);
-    }
-  }, [clientId, base, authHeaders, uploadPostInput, uploadPostUserInput, refresh]);
 
   const saveDestinationChoice = useCallback(async (action, payload = {}) => {
     setSelectionBusy(action);
@@ -904,15 +932,6 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
               {p.platform === 'linkedin' && details.needs_org_selection && (
                 <div className="sc-note">LinkedIn publishing goes to a company page. Reconnect with company-page permissions, then choose the page here.</div>
               )}
-              {p.platform === 'tiktok' && details.bridge_ready && !details.direct_ready && (
-                <div className="sc-note">Using UploadPost bridge. Direct TikTok will be ready after app approval and reconnect.</div>
-              )}
-              {p.platform === 'facebook' && details.bridge_ready && !details.direct_ready && (
-                <div className="sc-note">Using UploadPost bridge. Direct Facebook will be ready after app approval and reconnect.</div>
-              )}
-              {p.platform === 'instagram' && details.bridge_ready && !details.direct_ready && (
-                <div className="sc-note">Using UploadPost bridge. Direct Instagram will be ready after app approval and reconnect.</div>
-              )}
               {selectionError && ['facebook', 'linkedin'].includes(p.platform) && (
                 <span style={{ color: '#fca5a5', fontSize: 12 }}>{selectionError}</span>
               )}
@@ -927,58 +946,6 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
             })}
           </div>
         </>
-      )}
-
-      {allowPublisherProxyConfig && (
-        <div>
-          <div className="sc-section-label" style={{ marginTop: 20 }}>API Posting Proxy</div>
-          <p className="sc-subtitle">UploadPost enables temporary proxy posting to Facebook, Instagram, and TikTok.</p>
-          <div className="sc-list">
-            <div className="sc-row">
-              <div className="sc-row-main">
-                <BrandIcon icon={iconFor('uploadpost', 'UP')} />
-                <div className="sc-info">
-                  <div className="sc-name">UploadPost</div>
-                  <div className="sc-note">Covers Facebook, Instagram, and TikTok</div>
-                </div>
-                <div className="sc-actions">
-                  <span className={`sc-badge ${hasUploadPostReady ? 'sc-badge-green' : 'sc-badge-red'}`}>{hasUploadPostReady ? 'Active' : 'Not configured'}</span>
-                  {hasUploadPostReady && <button className="sc-btn sc-btn-ghost" onClick={() => saveUploadPostKey(true)} disabled={uploadPostBusy}>Remove</button>}
-                </div>
-              </div>
-              {(!hasUploadPostReady || showUploadPostForm) && (
-                <div className="sc-token-row">
-                  <input
-                    className="sc-input"
-                    type="password"
-                    placeholder="UploadPost API key"
-                    value={uploadPostInput}
-                    onChange={e => setUploadPostInput(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && saveUploadPostKey(false)}
-                  />
-                  <input
-                    className="sc-input"
-                    type="text"
-                    placeholder="UploadPost user/account"
-                    value={uploadPostUserInput}
-                    onChange={e => setUploadPostUserInput(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && saveUploadPostKey(false)}
-                  />
-                  <button className="sc-btn sc-btn-primary" onClick={() => saveUploadPostKey(false)} disabled={uploadPostBusy || !uploadPostInput || !uploadPostUserInput}>
-                    {uploadPostBusy ? 'Saving…' : hasUploadPostReady ? 'Update' : 'Save'}
-                  </button>
-                </div>
-              )}
-              {!hasUploadPostReady && !showUploadPostForm && (
-                <div className="sc-note">Missing: {[!hasUploadPostKey && 'API key', !hasUploadPostUser && 'user/account'].filter(Boolean).join(', ')}</div>
-              )}
-              {hasUploadPostReady && !showUploadPostForm && (
-                <button className="sc-btn sc-btn-ghost sc-btn-xs" style={{ alignSelf: 'flex-start' }} onClick={() => setShowUploadPostForm(true)}>Update UploadPost credentials</button>
-              )}
-              {uploadPostError && <span style={{ color: '#fca5a5', fontSize: 12 }}>{uploadPostError}</span>}
-            </div>
-          </div>
-        </div>
       )}
 
       {showPhotoFeedSources && (
