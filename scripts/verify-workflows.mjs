@@ -11,7 +11,7 @@ const workflows = [
   },
   {
     file: 'update-shared.yml',
-    write: true,
+    write: false,
     requireCheck: true,
   },
 ];
@@ -60,6 +60,71 @@ function checkWorkflow(file, text, { write, requireCheck }) {
   }
   if (requireCheck && !/npm run check\b/.test(text)) {
     failures.push(`${file}: workflow must run npm run check`);
+  }
+  if (file === 'update-shared.yml') {
+    if (/pull-requests:\s*write\b/i.test(text)) {
+      failures.push(`${file}: the repository token must remain read-only`);
+    }
+    if (/GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/.test(text)) {
+      failures.push(`${file}: repository GITHUB_TOKEN writes would suppress required PR checks`);
+    }
+    const patAuthoringBindings = text.match(
+      /GH_TOKEN:\s*\$\{\{\s*secrets\.SCALESMALL_PAT\s*\}\}/g,
+    ) ?? [];
+    if (patAuthoringBindings.length < 3) {
+      failures.push(`${file}: branch, rebase, and PR writes must use the existing automation PAT`);
+    }
+    if (!/gh pr create\b/.test(text)) {
+      failures.push(`${file}: dependency automation must open a protected pull request`);
+    }
+    if (!/--base\s+main\b/.test(text)) {
+      failures.push(`${file}: dependency automation pull requests must target main`);
+    }
+    const branchAssignments = [
+      ...text.matchAll(/^\s*branch="([^"]+)"\s*$/gm),
+    ].map((match) => match[1]);
+    if (
+      branchAssignments.length === 0
+      || branchAssignments.some((branch) => branch !== 'automation/update-shared')
+    ) {
+      failures.push(`${file}: dependency automation must reuse one bounded branch`);
+    }
+    if (!/gh pr list[\s\S]*--state\s+open/.test(text)) {
+      failures.push(`${file}: dependency automation must update an existing open pull request`);
+    }
+    if (!/git rev-list --count origin\/main\.\.HEAD/.test(text)) {
+      failures.push(`${file}: dependency automation must recover an existing unmerged branch`);
+    }
+    if (!/HEAD:refs\/heads\/\$branch\b/.test(text)) {
+      failures.push(`${file}: dependency automation must push only its generated branch`);
+    }
+    if (
+      !/remote_branch_sha="\$\(/
+        .test(text)
+      || !/--force-with-lease="refs\/heads\/\$branch:\$REMOTE_BRANCH_SHA"/.test(text)
+    ) {
+      failures.push(`${file}: persistent automation branch updates must use an exact force-with-lease`);
+    }
+    const localCommitIndex = text.indexOf('git commit -m "chore: update ssai-shared dependency"');
+    const fullCheckIndex = text.indexOf('run: npm run check');
+    const remotePushIndex = text.indexOf('HEAD:refs/heads/$branch');
+    if (
+      localCommitIndex === -1
+      || fullCheckIndex === -1
+      || remotePushIndex === -1
+      || !(localCommitIndex < fullCheckIndex && fullCheckIndex < remotePushIndex)
+    ) {
+      failures.push(`${file}: local commit must precede the full clean-tree check and remote push`);
+    }
+    if (
+      /^\s*git\s+push\b[^\r\n]*(?:\s|:)main(?:\s|$)/im.test(text)
+      || /^\s*git\s+push\s*$/im.test(text)
+    ) {
+      failures.push(`${file}: dependency automation must never push directly to main`);
+    }
+    if (!/if:\s*steps\.changes\.outputs\.changed\s*==\s*'true'/i.test(text)) {
+      failures.push(`${file}: dependency automation must skip branch and PR writes when nothing changed`);
+    }
   }
   if (/VITE_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.SSAI_PROD_SUPABASE_ANON_KEY\s*\}\}/.test(text) === false) {
     failures.push(`${file}: workflow must provide VITE_SUPABASE_ANON_KEY from production secrets`);
