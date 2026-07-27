@@ -30,6 +30,7 @@ jobs:
           node-version: '24'
 
       - name: Prepare the single automation branch
+        id: branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -37,7 +38,11 @@ jobs:
           branch="automation/update-shared"
           gh auth setup-git
           git fetch --no-tags origin main
-          if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+          remote_branch_sha="$(
+            git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}'
+          )"
+          echo "remote_branch_sha=$remote_branch_sha" >> "$GITHUB_OUTPUT"
+          if [ -n "$remote_branch_sha" ]; then
             git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
             git switch --create "$branch" --track "origin/$branch"
             git rebase origin/main
@@ -97,14 +102,14 @@ jobs:
             echo "needs_commit=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Validate production readiness
-        run: npm run check
-
-      - name: Commit validated shared package pointer
+      - name: Commit shared package pointer locally
         if: steps.changes.outputs.needs_commit == 'true'
         run: |
           set -euo pipefail
           git commit -m "chore: update ssai-shared dependency"
+
+      - name: Validate production readiness
+        run: npm run check
 
       - name: Rebase on the latest protected main
         if: steps.changes.outputs.changed == 'true'
@@ -120,10 +125,23 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          REMOTE_BRANCH_SHA: ${{ steps.branch.outputs.remote_branch_sha }}
         run: |
           set -euo pipefail
           branch="automation/update-shared"
-          git push --set-upstream origin "HEAD:refs/heads/$branch"
+          if [ -n "$REMOTE_BRANCH_SHA" ]; then
+            if [[ ! "$REMOTE_BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The fetched automation branch SHA is malformed."
+              exit 1
+            fi
+            git push \
+              --force-with-lease="refs/heads/$branch:$REMOTE_BRANCH_SHA" \
+              --set-upstream \
+              origin \
+              "HEAD:refs/heads/$branch"
+          else
+            git push --set-upstream origin "HEAD:refs/heads/$branch"
+          fi
           existing_pr="$(
             gh pr list \
               --base main \

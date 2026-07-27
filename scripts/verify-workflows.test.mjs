@@ -58,6 +58,30 @@ test('rejects automation that abandons an existing unmerged branch', () => {
   assert.match(result.stderr, /must recover an existing unmerged branch/);
 });
 
+test('rejects a persistent branch update without an exact force-with-lease', () => {
+  const result = runVerifier(
+    updateWorkflow.replace(
+      '--force-with-lease="refs/heads/$branch:$REMOTE_BRANCH_SHA"',
+      '--force',
+    ),
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must use an exact force-with-lease/);
+});
+
+test('rejects a full clean-tree check that runs before the local commit', () => {
+  const commit = 'git commit -m "chore: update ssai-shared dependency"';
+  const check = 'run: npm run check';
+  const result = runVerifier(
+    updateWorkflow
+      .replace(commit, '__LOCAL_COMMIT__')
+      .replace(check, commit)
+      .replace('__LOCAL_COMMIT__', check),
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /local commit must precede the full clean-tree check/);
+});
+
 function runVerifier(candidateUpdateWorkflow) {
   const root = mkdtempSync(path.join(tmpdir(), 'ssai-connect-workflows-'));
   try {

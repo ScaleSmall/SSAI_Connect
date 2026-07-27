@@ -86,8 +86,26 @@ function checkWorkflow(file, text, { write, requireCheck }) {
     if (!/git rev-list --count origin\/main\.\.HEAD/.test(text)) {
       failures.push(`${file}: dependency automation must recover an existing unmerged branch`);
     }
-    if (!/git push[^\r\n]*refs\/heads\/\$branch\b/.test(text)) {
+    if (!/HEAD:refs\/heads\/\$branch\b/.test(text)) {
       failures.push(`${file}: dependency automation must push only its generated branch`);
+    }
+    if (
+      !/remote_branch_sha="\$\(/
+        .test(text)
+      || !/--force-with-lease="refs\/heads\/\$branch:\$REMOTE_BRANCH_SHA"/.test(text)
+    ) {
+      failures.push(`${file}: persistent automation branch updates must use an exact force-with-lease`);
+    }
+    const localCommitIndex = text.indexOf('git commit -m "chore: update ssai-shared dependency"');
+    const fullCheckIndex = text.indexOf('run: npm run check');
+    const remotePushIndex = text.indexOf('HEAD:refs/heads/$branch');
+    if (
+      localCommitIndex === -1
+      || fullCheckIndex === -1
+      || remotePushIndex === -1
+      || !(localCommitIndex < fullCheckIndex && fullCheckIndex < remotePushIndex)
+    ) {
+      failures.push(`${file}: local commit must precede the full clean-tree check and remote push`);
     }
     if (
       /^\s*git\s+push\b[^\r\n]*(?:\s|:)main(?:\s|$)/im.test(text)
