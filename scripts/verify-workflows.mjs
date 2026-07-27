@@ -11,7 +11,7 @@ const workflows = [
   },
   {
     file: 'update-shared.yml',
-    write: true,
+    write: false,
     requireCheck: true,
   },
 ];
@@ -62,8 +62,17 @@ function checkWorkflow(file, text, { write, requireCheck }) {
     failures.push(`${file}: workflow must run npm run check`);
   }
   if (file === 'update-shared.yml') {
-    if (!/pull-requests:\s*write\b/i.test(text)) {
-      failures.push(`${file}: dependency automation must declare pull-request write permission`);
+    if (/pull-requests:\s*write\b/i.test(text)) {
+      failures.push(`${file}: the repository token must remain read-only`);
+    }
+    if (/GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/.test(text)) {
+      failures.push(`${file}: repository GITHUB_TOKEN writes would suppress required PR checks`);
+    }
+    const patAuthoringBindings = text.match(
+      /GH_TOKEN:\s*\$\{\{\s*secrets\.SCALESMALL_PAT\s*\}\}/g,
+    ) ?? [];
+    if (patAuthoringBindings.length < 3) {
+      failures.push(`${file}: branch, rebase, and PR writes must use the existing automation PAT`);
     }
     if (!/gh pr create\b/.test(text)) {
       failures.push(`${file}: dependency automation must open a protected pull request`);

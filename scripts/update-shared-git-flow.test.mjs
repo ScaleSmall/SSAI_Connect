@@ -33,7 +33,9 @@ test('a retained automation branch can be safely replaced after main advances', 
 
     gitOk(upstream, 'fetch', 'origin');
     gitOk(upstream, 'switch', 'main');
-    gitOk(upstream, 'merge', '--ff-only', 'origin/automation/update-shared');
+    writeFileSync(path.join(upstream, 'package.json'), '{"version":"2"}\n');
+    gitOk(upstream, 'add', 'package.json');
+    gitOk(upstream, 'commit', '-m', 'squash dependency update');
     gitOk(upstream, 'push', 'origin', 'main');
 
     gitOk(runner, 'fetch', 'origin', 'main');

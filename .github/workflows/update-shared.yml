@@ -9,8 +9,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   update:
@@ -29,10 +28,26 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Validate required secrets
+        env:
+          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
+        run: |
+          set -euo pipefail
+          for name in SCALESMALL_PAT VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required secret-backed env $name"
+              exit 1
+            fi
+            if [[ "${!name}" =~ (your-|replace-with|example|changeme|placeholder) ]]; then
+              echo "::error::$name must be a real value"
+              exit 1
+            fi
+          done
+
       - name: Prepare the single automation branch
         id: branch
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}
         run: |
           set -euo pipefail
           branch="automation/update-shared"
@@ -49,22 +64,6 @@ jobs:
           else
             git switch --create "$branch" origin/main
           fi
-
-      - name: Validate required secrets
-        env:
-          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
-        run: |
-          set -euo pipefail
-          for name in SCALESMALL_PAT VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::Missing required secret-backed env $name"
-              exit 1
-            fi
-            if [[ "${!name}" =~ (your-|replace-with|example|changeme|placeholder) ]]; then
-              echo "::error::$name must be a real value"
-              exit 1
-            fi
-          done
 
       - name: Configure git auth for private packages
         env:
@@ -114,7 +113,7 @@ jobs:
       - name: Rebase on the latest protected main
         if: steps.changes.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
@@ -124,7 +123,7 @@ jobs:
       - name: Push an automation branch and open a protected pull request
         if: steps.changes.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}
           REMOTE_BRANCH_SHA: ${{ steps.branch.outputs.remote_branch_sha }}
         run: |
           set -euo pipefail

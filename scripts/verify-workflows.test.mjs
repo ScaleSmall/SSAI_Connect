@@ -39,6 +39,17 @@ test('rejects dependency automation that does not create a pull request', () => 
   assert.match(result.stderr, /must open a protected pull request/);
 });
 
+test('rejects repository-token PR authorship that suppresses required checks', () => {
+  const result = runVerifier(
+    updateWorkflow.replaceAll(
+      'GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}',
+      'GH_TOKEN: ${{ github.token }}',
+    ),
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /GITHUB_TOKEN writes would suppress required PR checks/);
+});
+
 test('rejects an unbounded per-run automation branch', () => {
   const result = runVerifier(
     updateWorkflow.replace(
