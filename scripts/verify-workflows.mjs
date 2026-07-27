@@ -61,6 +61,44 @@ function checkWorkflow(file, text, { write, requireCheck }) {
   if (requireCheck && !/npm run check\b/.test(text)) {
     failures.push(`${file}: workflow must run npm run check`);
   }
+  if (file === 'update-shared.yml') {
+    if (!/pull-requests:\s*write\b/i.test(text)) {
+      failures.push(`${file}: dependency automation must declare pull-request write permission`);
+    }
+    if (!/gh pr create\b/.test(text)) {
+      failures.push(`${file}: dependency automation must open a protected pull request`);
+    }
+    if (!/--base\s+main\b/.test(text)) {
+      failures.push(`${file}: dependency automation pull requests must target main`);
+    }
+    const branchAssignments = [
+      ...text.matchAll(/^\s*branch="([^"]+)"\s*$/gm),
+    ].map((match) => match[1]);
+    if (
+      branchAssignments.length === 0
+      || branchAssignments.some((branch) => branch !== 'automation/update-shared')
+    ) {
+      failures.push(`${file}: dependency automation must reuse one bounded branch`);
+    }
+    if (!/gh pr list[\s\S]*--state\s+open/.test(text)) {
+      failures.push(`${file}: dependency automation must update an existing open pull request`);
+    }
+    if (!/git rev-list --count origin\/main\.\.HEAD/.test(text)) {
+      failures.push(`${file}: dependency automation must recover an existing unmerged branch`);
+    }
+    if (!/git push[^\r\n]*refs\/heads\/\$branch\b/.test(text)) {
+      failures.push(`${file}: dependency automation must push only its generated branch`);
+    }
+    if (
+      /^\s*git\s+push\b[^\r\n]*(?:\s|:)main(?:\s|$)/im.test(text)
+      || /^\s*git\s+push\s*$/im.test(text)
+    ) {
+      failures.push(`${file}: dependency automation must never push directly to main`);
+    }
+    if (!/if:\s*steps\.changes\.outputs\.changed\s*==\s*'true'/i.test(text)) {
+      failures.push(`${file}: dependency automation must skip branch and PR writes when nothing changed`);
+    }
+  }
   if (/VITE_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.SSAI_PROD_SUPABASE_ANON_KEY\s*\}\}/.test(text) === false) {
     failures.push(`${file}: workflow must provide VITE_SUPABASE_ANON_KEY from production secrets`);
   }

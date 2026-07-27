@@ -10,22 +10,40 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       VITE_SUPABASE_URL: ${{ secrets.SSAI_PROD_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.SSAI_PROD_SUPABASE_ANON_KEY }}
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
         with:
-          token: ${{ secrets.SCALESMALL_PAT }}
+          token: ${{ github.token }}
           persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: '24'
+
+      - name: Prepare the single automation branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="automation/update-shared"
+          gh auth setup-git
+          git fetch --no-tags origin main
+          if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch --create "$branch" --track "origin/$branch"
+            git rebase origin/main
+          else
+            git switch --create "$branch" origin/main
+          fi
 
       - name: Validate required secrets
         env:
@@ -51,19 +69,75 @@ jobs:
       - name: Update ssai-shared to latest
         run: npm install github:ScaleSmall/SSAI_Shared --save
 
+      - name: Remove private package Git authentication
+        if: always()
+        env:
+          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
+        run: git config --global --unset-all url."https://${SCALESMALL_PAT}@github.com/".insteadOf || true
+
       - name: Commit shared package pointer if changed
+        id: changes
         run: |
+          set -euo pipefail
           git config user.name "ScaleSmall Bot"
           git config user.email "admin@scalesmall.ai"
-          git add package.json package-lock.json 2>/dev/null || true
-          git diff --cached --quiet && echo "No changes"
-          git diff --cached --quiet || git commit -m "chore: update ssai-shared to ${{ github.event.client_payload.ref }}"
+          git add package.json package-lock.json
+          if git diff --cached --quiet; then
+            if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "needs_commit=false" >> "$GITHUB_OUTPUT"
+              echo "The bounded automation branch already contains an unmerged update."
+            else
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "needs_commit=false" >> "$GITHUB_OUTPUT"
+              echo "No shared package update is required."
+            fi
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "needs_commit=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate production readiness
         run: npm run check
 
-      - name: Push updated shared package pointer
+      - name: Commit validated shared package pointer
+        if: steps.changes.outputs.needs_commit == 'true'
         run: |
-          git diff --quiet HEAD origin/main && echo "No committed changes to push" && exit 0
-          git pull --rebase origin main
-          git push
+          set -euo pipefail
+          git commit -m "chore: update ssai-shared dependency"
+
+      - name: Rebase on the latest protected main
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git rebase origin/main
+          npm run check
+
+      - name: Push an automation branch and open a protected pull request
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="automation/update-shared"
+          git push --set-upstream origin "HEAD:refs/heads/$branch"
+          existing_pr="$(
+            gh pr list \
+              --base main \
+              --head "${GITHUB_REPOSITORY_OWNER}:$branch" \
+              --state open \
+              --json url \
+              --jq '.[0].url // empty'
+          )"
+          if [ -n "$existing_pr" ]; then
+            echo "Updated existing protected pull request: $existing_pr"
+          else
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore: update ssai-shared dependency" \
+              --body "Automated dependency update from SSAI_Shared dispatch. This pull request must pass the normal protected-main checks and review before merge."
+          fi
