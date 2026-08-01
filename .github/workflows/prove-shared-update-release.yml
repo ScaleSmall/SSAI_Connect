@@ -1,0 +1,393 @@
+name: Prove Shared update release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+    paths:
+      - package.json
+      - package-lock.json
+
+permissions: {}
+
+jobs:
+  prove:
+    name: Prove reviewed Shared pin is validated and live
+    if: >-
+      github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.head.ref, 'automation/ssai-shared-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Monitor exact protected-main and hosted release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGED_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          EVENT_BASE_SHA: ${{ github.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_RULESET_ID: ${{ vars.SSAI_CONNECT_PROTECTED_MAIN_RULESET_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in "${MERGED_SHA}" "${EVENT_BASE_SHA}"; do
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [ "${EVENT_BASE_SHA}" = "${MERGED_SHA}" ]
+          [ "${PR_BASE_REF}" = 'main' ]
+          [ "${PR_HEAD_REPOSITORY}" = "${GITHUB_REPOSITORY}" ]
+          [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]
+          [[ "${PR_HEAD_REF}" =~ ^automation/ssai-shared-[0-9a-f]{40}-[0-9a-f]{40}$ ]]
+          branch_identity="${PR_HEAD_REF#automation/ssai-shared-}"
+          target_shared_sha="${branch_identity%%-*}"
+          source_connect_sha="${branch_identity#*-}"
+          [[ "${target_shared_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${source_connect_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_RULESET_ID}" =~ ^[0-9]+$ ]] || {
+            echo '::error::SSAI_CONNECT_PROTECTED_MAIN_RULESET_ID is not bound to the reviewed release controls'
+            exit 1
+          }
+
+          expected_ruleset_name='SSAI Connect protected main'
+          ruleset="$(gh api "repos/${GITHUB_REPOSITORY}/rulesets/${EXPECTED_RULESET_ID}")"
+          jq -e \
+            --argjson id "${EXPECTED_RULESET_ID}" \
+            --arg name "${expected_ruleset_name}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $id
+                and .name == $name
+                and .source_type == "Repository"
+                and .source == $repository
+                and .target == "branch"
+                and .enforcement == "active"
+                and .current_user_can_bypass == "never"
+                and .conditions.ref_name.include == ["refs/heads/main"]
+                and .conditions.ref_name.exclude == []
+                and ((has("bypass_actors") | not) or .bypass_actors == [])
+            ' <<<"${ruleset}" >/dev/null
+          effective_pages="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100")"
+          effective_rules="$(jq -c \
+            --argjson id "${EXPECTED_RULESET_ID}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              [add[] |
+                select(.ruleset_id == $id
+                  and .ruleset_source_type == "Repository"
+                  and .ruleset_source == $repository)]
+            ' <<<"${effective_pages}")"
+          validate_required_rules() {
+            local candidate_rules="$1"
+            jq -e '
+              def count_type($type): [.[] | select(.type == $type)] | length;
+              count_type("deletion") == 1
+                and count_type("non_fast_forward") == 1
+                and count_type("required_linear_history") == 1
+                and count_type("pull_request") == 1
+                and count_type("required_status_checks") == 1
+                and (
+                  [.[] | select(.type == "pull_request")][0].parameters
+                    | (.required_approving_review_count >= 1)
+                      and .dismiss_stale_reviews_on_push == true
+                      and .require_last_push_approval == true
+                      and .required_review_thread_resolution == true
+                      and (.allowed_merge_methods | sort) == ["rebase", "squash"]
+                )
+                and (
+                  [.[] | select(.type == "required_status_checks")][0].parameters
+                    | .strict_required_status_checks_policy == true
+                      and .do_not_enforce_on_create == false
+                      and ([.required_status_checks[] | {context, integration_id}] | sort_by(.context))
+                        == [
+                          {context:"Cloudflare Pages", integration_id:85455},
+                          {context:"validate", integration_id:15368}
+                        ]
+                )
+            ' <<<"${candidate_rules}" >/dev/null
+          }
+          validate_required_rules "$(jq -c '.rules' <<<"${ruleset}")" || {
+            echo '::error::The live Connect ruleset definition is weaker than the reviewed release contract'
+            exit 1
+          }
+          validate_required_rules "${effective_rules}" || {
+            echo '::error::The effective Connect main controls are weaker than the reviewed release contract'
+            exit 1
+          }
+
+          pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          jq -e \
+            --arg base "${PR_BASE_REF}" \
+            --arg head "${PR_HEAD_REF}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg merged_sha "${MERGED_SHA}" '
+              .state == "closed"
+                and .merged == true
+                and .base.ref == $base
+                and .head.ref == $head
+                and .head.repo.full_name == $repository
+                and .merge_commit_sha == $merged_sha
+                and .merged_by.type == "User"
+                and (.merged_by.login | type == "string" and length > 0)
+            ' <<<"${pr}" >/dev/null
+          reviewed_head_sha="$(jq -er '.head.sha' <<<"${pr}")"
+          pr_author_login="$(jq -er '.user.login' <<<"${pr}")"
+          pr_merger_login="$(jq -er '.merged_by.login' <<<"${pr}")"
+          [[ "${reviewed_head_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [ "${pr_author_login}" != "${pr_merger_login}" ]
+
+          review_pages="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
+          reviewer='tylan-scale-small'
+          latest_reviewer_decision="$(jq -c \
+            --arg head "${reviewed_head_sha}" \
+            --arg reviewer "${reviewer}" '
+              [add[] |
+                select(.commit_id == $head
+                  and .user.type == "User"
+                  and .user.login == $reviewer
+                  and (.state == "APPROVED"
+                    or .state == "CHANGES_REQUESTED"
+                    or .state == "DISMISSED"))]
+                | sort_by(.submitted_at // "", .id)
+                | last
+            ' <<<"${review_pages}")"
+          jq -e --arg reviewer "${reviewer}" '
+            .state == "APPROVED"
+              and .user.login == $reviewer
+              and .user.type == "User"
+          ' <<<"${latest_reviewer_decision}" >/dev/null
+          reviewer_permission="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/collaborators/${reviewer}/permission")"
+          jq -e --arg reviewer "${reviewer}" '
+            .user.login == $reviewer
+              and .user.type == "User"
+              and (.permission == "admin"
+                or .permission == "maintain"
+                or .permission == "write")
+          ' <<<"${reviewer_permission}" >/dev/null
+
+          reviewed_head_commit="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${reviewed_head_sha}")"
+          jq -e --arg sha "${reviewed_head_sha}" --arg parent "${source_connect_sha}" '
+            .sha == $sha
+              and (.parents | length) == 1
+              and .parents[0].sha == $parent
+              and (.tree.sha | test("^[0-9a-f]{40}$"))
+          ' <<<"${reviewed_head_commit}" >/dev/null
+          reviewed_head_tree_sha="$(jq -er '.tree.sha' <<<"${reviewed_head_commit}")"
+          mapfile -t changed_files < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+              --jq '.[].filename' | sort
+          )
+          [ "${#changed_files[@]}" -eq 2 ]
+          [ "${changed_files[0]}" = 'package-lock.json' ]
+          [ "${changed_files[1]}" = 'package.json' ]
+
+          merged_commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${MERGED_SHA}")"
+          merged_tree_sha="$(jq -er --arg sha "${MERGED_SHA}" \
+            'select(.sha == $sha) | .tree.sha' <<<"${merged_commit}")"
+          if [ "${merged_tree_sha}" != "${reviewed_head_tree_sha}" ]; then
+            echo "::error::Merged tree ${merged_tree_sha} differs from reviewed candidate tree ${reviewed_head_tree_sha}"
+            exit 1
+          fi
+
+          expected_spec="github:ScaleSmall/SSAI_Shared#${target_shared_sha}"
+          expected_ssh="git+ssh://git@github.com/ScaleSmall/SSAI_Shared.git#${target_shared_sha}"
+          expected_https="git+https://github.com/ScaleSmall/SSAI_Shared.git#${target_shared_sha}"
+          package_payload="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/contents/package.json?ref=${MERGED_SHA}")"
+          lock_payload="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/contents/package-lock.json?ref=${MERGED_SHA}")"
+          package_json="$(jq -er 'select(.type == "file" and .encoding == "base64") | .content' \
+            <<<"${package_payload}" | base64 --decode)"
+          package_lock="$(jq -er 'select(.type == "file" and .encoding == "base64") | .content' \
+            <<<"${lock_payload}" | base64 --decode)"
+          jq -e --arg spec "${expected_spec}" \
+            '.dependencies["ssai-shared"] == $spec' <<<"${package_json}" >/dev/null
+          jq -e \
+            --arg spec "${expected_spec}" \
+            --arg ssh "${expected_ssh}" \
+            --arg https "${expected_https}" '
+              .packages[""].dependencies["ssai-shared"] == $spec
+                and (.packages["node_modules/ssai-shared"].resolved == $ssh
+                  or .packages["node_modules/ssai-shared"].resolved == $https)
+            ' <<<"${package_lock}" >/dev/null
+
+          validate_workflow_id=289102321
+          validate_workflow_path='.github/workflows/validate.yml'
+          expected_gate_title="Validate Connect app [shared-${target_shared_sha}-${reviewed_head_sha}]"
+          reviewed_gate_runs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${validate_workflow_id}/runs?event=workflow_dispatch&head_sha=${reviewed_head_sha}&per_page=100")"
+          reviewed_gate_matches="$(jq -c \
+            --arg sha "${reviewed_head_sha}" \
+            --arg branch "${PR_HEAD_REF}" \
+            --arg title "${expected_gate_title}" \
+            --arg path "${validate_workflow_path}" '
+              [.workflow_runs[] |
+                select(.event == "workflow_dispatch"
+                  and .head_sha == $sha
+                  and .head_branch == $branch
+                  and .display_title == $title
+                  and .path == $path
+                  and .actor.login == "github-actions[bot]"
+                  and .triggering_actor.login == "github-actions[bot]"
+                  and .run_attempt == 1
+                  and .status == "completed"
+                  and .conclusion == "success")]
+            ' <<<"${reviewed_gate_runs}")"
+          if [ "$(jq -r 'length' <<<"${reviewed_gate_matches}")" -ne 1 ]; then
+            echo '::error::Expected exactly one successful explicit validate gate for the reviewed candidate'
+            exit 1
+          fi
+          reviewed_gate_run_id="$(jq -er '.[0].id' <<<"${reviewed_gate_matches}")"
+
+          validate_run_id=''
+          cloudflare_check_id=''
+          hosted_proven=0
+          last_state=''
+          for _ in $(seq 1 300); do
+            if [ -z "${validate_run_id}" ]; then
+              validate_runs="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${validate_workflow_id}/runs?event=push&branch=main&per_page=50")"
+              validate_matches="$(jq -c --arg sha "${MERGED_SHA}" --arg path "${validate_workflow_path}" '
+                [.workflow_runs[] |
+                  select(.event == "push"
+                    and .head_branch == "main"
+                    and .head_sha == $sha
+                    and .path == $path)]
+              ' <<<"${validate_runs}")"
+              [ "$(jq -r 'length' <<<"${validate_matches}")" -le 1 ] || {
+                echo '::error::Multiple validate push runs exist for the exact merged SHA'
+                exit 1
+              }
+              if [ "$(jq -r 'length' <<<"${validate_matches}")" -eq 1 ]; then
+                validate_run_id="$(jq -er '.[0].id' <<<"${validate_matches}")"
+              fi
+            fi
+
+            check_runs="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/commits/${MERGED_SHA}/check-runs?per_page=100")"
+            validate_checks="$(jq -c --arg sha "${MERGED_SHA}" '
+              [.check_runs[] |
+                select(.name == "validate"
+                  and .head_sha == $sha
+                  and .app.id == 15368)]
+            ' <<<"${check_runs}")"
+            cloudflare_checks="$(jq -c --arg sha "${MERGED_SHA}" '
+              [.check_runs[] |
+                select(.name == "Cloudflare Pages"
+                  and .head_sha == $sha
+                  and .app.id == 85455)]
+            ' <<<"${check_runs}")"
+            [ "$(jq -r 'length' <<<"${validate_checks}")" -le 1 ] || {
+              echo '::error::Multiple validate checks exist for the exact merged SHA'
+              exit 1
+            }
+            [ "$(jq -r 'length' <<<"${cloudflare_checks}")" -le 1 ] || {
+              echo '::error::Multiple Cloudflare Pages checks exist for the exact merged SHA'
+              exit 1
+            }
+            if [ "$(jq -r 'length' <<<"${cloudflare_checks}")" -eq 1 ]; then
+              cloudflare_check_id="$(jq -er '.[0].id' <<<"${cloudflare_checks}")"
+            fi
+
+            validate_state="$(jq -r 'if length == 1 then .[0] | "\(.status):\(.conclusion // "")" else "missing" end' <<<"${validate_checks}")"
+            cloudflare_state="$(jq -r 'if length == 1 then .[0] | "\(.status):\(.conclusion // "")" else "missing" end' <<<"${cloudflare_checks}")"
+            state="validate=${validate_state} cloudflare=${cloudflare_state} hosted=${hosted_proven}"
+            if [ "${state}" != "${last_state}" ]; then
+              printf '%s\n' "${state}"
+              last_state="${state}"
+            fi
+            for observed in "${validate_state}" "${cloudflare_state}"; do
+              case "${observed}" in
+                completed:success|missing|queued:|in_progress:|pending:|waiting:|requested:)
+                  ;;
+                completed:*)
+                  echo "::error::Protected hosted check concluded ${observed#completed:}"
+                  exit 1
+                  ;;
+                *)
+                  echo "::error::Unexpected hosted check state ${observed}"
+                  exit 1
+                  ;;
+              esac
+            done
+
+            if [ "${hosted_proven}" -eq 0 ]; then
+              identity_file="$(mktemp "${RUNNER_TEMP}/ssai-connect-build-identity.XXXXXX")"
+              http_status="$(curl --silent --show-error --location \
+                --connect-timeout 5 --max-time 15 --max-filesize 4096 \
+                --header 'Accept: application/json' \
+                --header 'Cache-Control: no-cache' \
+                --output "${identity_file}" --write-out '%{http_code}' \
+                "https://connect.scalesmall.ai/build-identity.json?sha=${MERGED_SHA}&attempt=${RANDOM}" \
+                || true)"
+              if [ "${http_status}" = '200' ] \
+                && [ "$(wc -c <"${identity_file}")" -le 4096 ] \
+                && jq -e --arg sha "${MERGED_SHA}" '
+                  (keys | sort) == ["repository", "schema", "service", "sha"]
+                    and .schema == "ssai.connect.build-identity.v1"
+                    and .service == "SSAI_Connect"
+                    and .repository == "ScaleSmall/SSAI_Connect"
+                    and .sha == $sha
+                ' "${identity_file}" >/dev/null 2>&1; then
+                hosted_proven=1
+              fi
+              rm -f -- "${identity_file}"
+            fi
+
+            if [ -n "${validate_run_id}" ] \
+              && [ -n "${cloudflare_check_id}" ] \
+              && [ "${validate_state}" = 'completed:success' ] \
+              && [ "${cloudflare_state}" = 'completed:success' ] \
+              && [ "${hosted_proven}" -eq 1 ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          [[ "${validate_run_id}" =~ ^[0-9]+$ ]]
+          [[ "${cloudflare_check_id}" =~ ^[0-9]+$ ]]
+          [ "${hosted_proven}" -eq 1 ]
+          validate_run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${validate_run_id}")"
+          jq -e --arg sha "${MERGED_SHA}" --arg path "${validate_workflow_path}" '
+            .event == "push"
+              and .head_branch == "main"
+              and .head_sha == $sha
+              and .path == $path
+              and .status == "completed"
+              and .conclusion == "success"
+          ' <<<"${validate_run}" >/dev/null
+          cloudflare_check="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/check-runs/${cloudflare_check_id}")"
+          jq -e --arg sha "${MERGED_SHA}" '
+            .name == "Cloudflare Pages"
+              and .head_sha == $sha
+              and .app.id == 85455
+              and .status == "completed"
+              and .conclusion == "success"
+          ' <<<"${cloudflare_check}" >/dev/null
+
+          main_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main")"
+          main_sha="$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${main_ref}")"
+          [[ "${main_sha}" =~ ^[0-9a-f]{40}$ ]]
+          ancestry="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${MERGED_SHA}...${main_sha}")"
+          jq -e --arg base "${MERGED_SHA}" --arg head "${main_sha}" '
+            .base_commit.sha == $base
+              and .merge_base_commit.sha == $base
+              and .status == (if $base == $head then "identical" else "ahead" end)
+          ' <<<"${ancestry}" >/dev/null
+
+          printf 'reviewed release connect=%s merged_tree=%s source_connect=%s candidate=%s candidate_tree=%s shared=%s pr=%s merger=%s approver=%s ruleset=%s branch_gate=%s validate=%s cloudflare=%s hosted_identity=true\n' \
+            "${MERGED_SHA}" "${merged_tree_sha}" "${source_connect_sha}" "${reviewed_head_sha}" \
+            "${reviewed_head_tree_sha}" "${target_shared_sha}" "${PR_NUMBER}" "${pr_merger_login}" \
+            "${reviewer}" "${EXPECTED_RULESET_ID}" "${reviewed_gate_run_id}" \
+            "${validate_run_id}" "${cloudflare_check_id}"

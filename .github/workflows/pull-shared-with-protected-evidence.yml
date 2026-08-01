@@ -1,0 +1,1242 @@
+name: Pull Shared with protected local evidence
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: connect-local-shared-pull
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  discover:
+    name: Read public immutable Shared evidence
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || vars.SSAI_SHARED_PULL_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      connect_base_sha: ${{ steps.connect.outputs.connect_base_sha }}
+      connect_base_tree_sha: ${{ steps.connect.outputs.connect_base_tree_sha }}
+      shared_sha: ${{ steps.shared.outputs.shared_sha }}
+      shared_tree_sha: ${{ steps.shared.outputs.shared_tree_sha }}
+      shared_package_blob_sha: ${{ steps.shared.outputs.shared_package_blob_sha }}
+      shared_package_json_sha256: ${{ steps.shared.outputs.shared_package_json_sha256 }}
+      shared_package_version: ${{ steps.shared.outputs.shared_package_version }}
+      mode: ${{ steps.review.outputs.mode }}
+      review_branch: ${{ steps.review.outputs.review_branch }}
+      review_candidate_sha: ${{ steps.review.outputs.review_candidate_sha }}
+      review_branch_gate_run_id: ${{ steps.review.outputs.review_branch_gate_run_id }}
+      canonical_candidate_tree_sha: ${{ steps.canonical.outputs.tested_tree_sha }}
+      canonical_lock_sha256: ${{ steps.canonical.outputs.lock_sha256 }}
+      run_identity: ${{ steps.evidence.outputs.run_identity }}
+    steps:
+      - name: Refuse rollout unless the exact active main ruleset enforces review and both hosted checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_RULESET_ID: ${{ vars.SSAI_CONNECT_PROTECTED_MAIN_RULESET_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_RULESET_ID}" =~ ^[0-9]+$ ]] || {
+            echo '::error::SSAI_CONNECT_PROTECTED_MAIN_RULESET_ID must bind the reviewed empty-bypass main ruleset before UAT'
+            exit 1
+          }
+          expected_ruleset_name='SSAI Connect protected main'
+
+          ruleset="$(gh api "repos/${GITHUB_REPOSITORY}/rulesets/${EXPECTED_RULESET_ID}")"
+          jq -e \
+            --argjson id "${EXPECTED_RULESET_ID}" \
+            --arg name "${expected_ruleset_name}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $id
+                and .name == $name
+                and .source_type == "Repository"
+                and .source == $repository
+                and .target == "branch"
+                and .enforcement == "active"
+                and .current_user_can_bypass == "never"
+                and .conditions.ref_name.include == ["refs/heads/main"]
+                and .conditions.ref_name.exclude == []
+                and ((has("bypass_actors") | not) or .bypass_actors == [])
+            ' <<<"${ruleset}" >/dev/null
+
+          effective_pages="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100")"
+          effective_rules="$(jq -c \
+            --argjson id "${EXPECTED_RULESET_ID}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              [add[] |
+                select(.ruleset_id == $id
+                  and .ruleset_source_type == "Repository"
+                  and .ruleset_source == $repository)]
+            ' <<<"${effective_pages}")"
+          validate_required_rules() {
+            local candidate_rules="$1"
+            jq -e '
+              def count_type($type): [.[] | select(.type == $type)] | length;
+              count_type("deletion") == 1
+                and count_type("non_fast_forward") == 1
+                and count_type("required_linear_history") == 1
+                and count_type("pull_request") == 1
+                and count_type("required_status_checks") == 1
+                and (
+                  [.[] | select(.type == "pull_request")][0].parameters
+                    | (.required_approving_review_count >= 1)
+                      and .dismiss_stale_reviews_on_push == true
+                      and .require_last_push_approval == true
+                      and .required_review_thread_resolution == true
+                      and (.allowed_merge_methods | sort) == ["rebase", "squash"]
+                )
+                and (
+                  [.[] | select(.type == "required_status_checks")][0].parameters
+                    | .strict_required_status_checks_policy == true
+                      and .do_not_enforce_on_create == false
+                      and ([.required_status_checks[] | {context, integration_id}] | sort_by(.context))
+                        == [
+                          {context:"Cloudflare Pages", integration_id:85455},
+                          {context:"validate", integration_id:15368}
+                        ]
+                )
+            ' <<<"${candidate_rules}" >/dev/null
+          }
+          if ! validate_required_rules "$(jq -c '.rules' <<<"${ruleset}")"; then
+            echo '::error::The exact Connect ruleset definition is weaker than the reviewed release contract'
+            exit 1
+          fi
+          if ! validate_required_rules "${effective_rules}"; then
+            echo '::error::The exact Connect main ruleset must effectively require review, strict validate and Cloudflare Pages checks, linear history, and reject force push/deletion'
+            exit 1
+          fi
+          echo "protected main ruleset=${EXPECTED_RULESET_ID} approval=required stale=dismissed last_push=approved strict_checks=validate,Cloudflare_Pages linear=true force_push=false deletion=false current_actor_bypass=never"
+
+      - name: Check out Connect main without persisted credentials
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+
+      - name: Bind checkout to current Connect main
+        id: connect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checkout_sha="$(git rev-parse HEAD)"
+          checkout_tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          connect_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main")"
+          connect_main_sha="$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${connect_ref}")"
+          connect_commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${connect_main_sha}")"
+          connect_main_tree_sha="$(jq -er '.tree.sha' <<<"${connect_commit}")"
+          [[ "${checkout_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${checkout_tree_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [ "${checkout_sha}" = "${connect_main_sha}" ]
+          [ "${checkout_tree_sha}" = "${connect_main_tree_sha}" ]
+          printf 'connect_base_sha=%s\n' "${checkout_sha}" >>"${GITHUB_OUTPUT}"
+          printf 'connect_base_tree_sha=%s\n' "${checkout_tree_sha}" >>"${GITHUB_OUTPUT}"
+          unset GH_TOKEN connect_ref connect_commit
+
+      - name: Read Shared main, commit, and package through independent public readers
+        id: shared
+        shell: bash
+        run: node scripts/read-public-shared-source.mjs
+
+      - name: Classify exact Connect dependency pin
+        id: pin
+        env:
+          TARGET_SHARED_SHA: ${{ steps.shared.outputs.shared_sha }}
+        shell: bash
+        run: node scripts/classify-connect-shared-pin.mjs
+
+      - name: Derive the canonical candidate tree from trusted Connect main
+        if: steps.pin.outputs.mode == 'update'
+        id: canonical
+        env:
+          EXPECTED_SHARED_SHA: ${{ steps.shared.outputs.shared_sha }}
+          EXPECTED_SHARED_PACKAGE_JSON_SHA256: ${{ steps.shared.outputs.shared_package_json_sha256 }}
+        shell: bash
+        run: node scripts/reconstruct-shared-dependency.mjs
+
+      - name: Suppress an exact branch already awaiting human review
+        id: review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN_MODE: ${{ steps.pin.outputs.mode }}
+          CONNECT_BASE_SHA: ${{ steps.connect.outputs.connect_base_sha }}
+          TARGET_SHARED_SHA: ${{ steps.shared.outputs.shared_sha }}
+          CANONICAL_CANDIDATE_TREE_SHA: ${{ steps.canonical.outputs.tested_tree_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CONNECT_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${TARGET_SHARED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          review_branch="automation/ssai-shared-${TARGET_SHARED_SHA}-${CONNECT_BASE_SHA}"
+          target_prefix="automation/ssai-shared-${TARGET_SHARED_SHA}-"
+          [[ "${review_branch}" =~ ^automation/ssai-shared-[0-9a-f]{40}-[0-9a-f]{40}$ ]]
+          printf 'review_branch=%s\n' "${review_branch}" >>"${GITHUB_OUTPUT}"
+
+          if [ "${PIN_MODE}" = 'no_change' ]; then
+            echo 'mode=no_change' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          [ "${PIN_MODE}" = 'update' ]
+          [[ "${CANONICAL_CANDIDATE_TREE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+
+          validate_candidate() {
+            local branch="$1"
+            local branch_sha="$2"
+            local parent_sha="$3"
+            local kind="$4"
+            local pull_files="${5:-null}"
+            local commit comparison
+            [[ "${branch}" =~ ^automation/ssai-shared-${TARGET_SHARED_SHA}-[0-9a-f]{40}$ ]]
+            [[ "${branch_sha}" =~ ^[0-9a-f]{40}$ ]]
+            [[ "${parent_sha}" =~ ^[0-9a-f]{40}$ ]]
+            [ "${branch}" = "automation/ssai-shared-${TARGET_SHARED_SHA}-${parent_sha}" ]
+
+            commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${branch_sha}")"
+            comparison="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/compare/${parent_sha}...${branch_sha}")"
+            jq -n \
+              --arg kind "${kind}" \
+              --arg branch "${branch}" \
+              --arg branchSha "${branch_sha}" \
+              --arg parentSha "${parent_sha}" \
+              --arg targetSharedSha "${TARGET_SHARED_SHA}" \
+              --arg canonicalTreeSha "${CANONICAL_CANDIDATE_TREE_SHA}" \
+              --argjson commit "${commit}" \
+              --argjson comparison "${comparison}" \
+              --argjson pullFiles "${pull_files}" \
+              '{
+                kind: $kind,
+                branch: $branch,
+                branchSha: $branchSha,
+                parentSha: $parentSha,
+                targetSharedSha: $targetSharedSha,
+                canonicalTreeSha: $canonicalTreeSha,
+                commit: $commit,
+                comparison: $comparison,
+                pullFiles: $pullFiles
+              }' |
+              node scripts/validate-reused-shared-candidate.mjs
+          }
+
+          open_pull_pages="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100")"
+          matching_pulls="$(jq -c \
+            --arg prefix "${target_prefix}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              [add[] |
+                select(.head.repo.full_name == $repository
+                  and (.head.ref | startswith($prefix)))]
+            ' <<<"${open_pull_pages}")"
+          open_count="$(jq -r 'length' <<<"${matching_pulls}")"
+          if [ "${open_count}" -gt 1 ]; then
+            echo '::error::More than one open review exists for the same immutable Shared commit'
+            exit 1
+          fi
+          if [ "${open_count}" -eq 1 ]; then
+            open_branch="$(jq -er '.[0].head.ref' <<<"${matching_pulls}")"
+            open_sha="$(jq -er '.[0].head.sha' <<<"${matching_pulls}")"
+            open_number="$(jq -er '.[0].number' <<<"${matching_pulls}")"
+            [[ "${open_branch}" =~ ^automation/ssai-shared-${TARGET_SHARED_SHA}-([0-9a-f]{40})$ ]]
+            open_parent_sha="${BASH_REMATCH[1]}"
+            if [ "${open_parent_sha}" != "${CONNECT_BASE_SHA}" ]; then
+              echo "::error::Open Shared review #${open_number} is stale: encoded_base=${open_parent_sha} current_main=${CONNECT_BASE_SHA}"
+              echo '::error::Close the stale immutable review through the normal human workflow before a fresh current-base candidate is created'
+              exit 1
+            fi
+            exact_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${open_branch}")"
+            jq -e --arg sha "${open_sha}" \
+              '.object.type == "commit" and .object.sha == $sha' <<<"${exact_ref}" >/dev/null
+            pull_files="$(gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/pulls/${open_number}/files?per_page=100")"
+            pull_file_entries="$(jq -c 'add' <<<"${pull_files}")"
+            validate_candidate \
+              "${open_branch}" "${open_sha}" "${open_parent_sha}" pending_pr "${pull_file_entries}"
+            printf 'review_candidate_sha=%s\n' "${open_sha}" >>"${GITHUB_OUTPUT}"
+            workflow_id=289102321
+            workflow_path='.github/workflows/validate.yml'
+            correlation="shared-${TARGET_SHARED_SHA}-${open_sha}"
+            expected_title="Validate Connect app [${correlation}]"
+            encoded_branch="$(jq -rn --arg value "${open_branch}" '$value | @uri')"
+            gate_runs="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=workflow_dispatch&branch=${encoded_branch}&per_page=100")"
+            gate_matches="$(jq -c \
+              --arg sha "${open_sha}" \
+              --arg branch "${open_branch}" \
+              --arg title "${expected_title}" \
+              --arg path "${workflow_path}" '
+                [.workflow_runs[] |
+                  select(.event == "workflow_dispatch"
+                    and .head_sha == $sha
+                    and .head_branch == $branch
+                    and .display_title == $title
+                    and .path == $path)]
+              ' <<<"${gate_runs}")"
+            gate_count="$(jq -r 'length' <<<"${gate_matches}")"
+            if [ "${gate_count}" -ne 1 ]; then
+              echo "::error::An open Shared review requires exactly one prior explicit gate; found ${gate_count}"
+              echo '::error::The gate-before-PR contract will not dispatch, rerun, or repair a review that was published early'
+              exit 1
+            fi
+
+            gate_run_id="$(jq -er '.[0].id' <<<"${gate_matches}")"
+            [[ "${gate_run_id}" =~ ^[0-9]+$ ]]
+            printf 'review_branch_gate_run_id=%s\n' "${gate_run_id}" >>"${GITHUB_OUTPUT}"
+            gate_run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${gate_run_id}")"
+            jq -e \
+              --argjson id "${gate_run_id}" \
+              --arg sha "${open_sha}" \
+              --arg branch "${open_branch}" \
+              --arg title "${expected_title}" \
+              --arg path "${workflow_path}" '
+                .id == $id
+                  and .event == "workflow_dispatch"
+                  and .head_sha == $sha
+                  and .head_branch == $branch
+                  and .display_title == $title
+                  and .path == $path
+                  and .run_attempt == 1
+                  and .status == "completed"
+                  and .conclusion == "success"
+                  and .actor.login == "github-actions[bot]"
+                  and .triggering_actor.login == "github-actions[bot]"
+              ' <<<"${gate_run}" >/dev/null
+            open_draft="$(jq -er '.[0].draft | tostring' <<<"${matching_pulls}")"
+            if [ "${open_draft}" != 'false' ]; then
+              echo "::error::Legacy draft Shared review #${open_number} cannot be transitioned by the repository Actions token"
+              echo '::error::A human must mark the exact already-gated PR ready, or close it through the normal review workflow'
+              exit 1
+            fi
+            echo 'mode=pending_review' >>"${GITHUB_OUTPUT}"
+            printf 'pending review pr=%s branch=%s source_base=%s shared=%s candidate=%s branch_gate=%s\n' \
+              "${open_number}" "${open_branch}" "${open_parent_sha}" "${TARGET_SHARED_SHA}" \
+              "${open_sha}" "${gate_run_id}"
+            exit 0
+          fi
+
+          matching_refs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${review_branch}")"
+          exact_refs="$(jq -c --arg ref "refs/heads/${review_branch}" \
+            '[.[] | select(.ref == $ref and .object.type == "commit")]' <<<"${matching_refs}")"
+          count="$(jq -r 'length' <<<"${exact_refs}")"
+          if [ "${count}" -eq 0 ]; then
+            echo 'mode=update' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${count}" -ne 1 ]; then
+            echo '::error::Expected at most one exact Shared review branch'
+            exit 1
+          fi
+
+          branch_sha="$(jq -r '.[0].object.sha' <<<"${exact_refs}")"
+          validate_candidate \
+            "${review_branch}" "${branch_sha}" "${CONNECT_BASE_SHA}" preexisting_ref null
+          echo 'mode=branch_ready' >>"${GITHUB_OUTPUT}"
+          printf 'review_candidate_sha=%s\n' "${branch_sha}" >>"${GITHUB_OUTPUT}"
+          printf 'unassociated validated branch=%s connect=%s shared=%s candidate=%s\n' \
+            "${review_branch}" "${CONNECT_BASE_SHA}" "${TARGET_SHARED_SHA}" "${branch_sha}"
+
+      - name: Emit immutable discovery provenance
+        id: evidence
+        env:
+          CONNECT_BASE_SHA: ${{ steps.connect.outputs.connect_base_sha }}
+          CONNECT_BASE_TREE_SHA: ${{ steps.connect.outputs.connect_base_tree_sha }}
+          SHARED_SHA: ${{ steps.shared.outputs.shared_sha }}
+          SHARED_TREE_SHA: ${{ steps.shared.outputs.shared_tree_sha }}
+          SHARED_PACKAGE_BLOB_SHA: ${{ steps.shared.outputs.shared_package_blob_sha }}
+          SHARED_PACKAGE_JSON_SHA256: ${{ steps.shared.outputs.shared_package_json_sha256 }}
+          SHARED_PACKAGE_VERSION: ${{ steps.shared.outputs.shared_package_version }}
+          MODE: ${{ steps.review.outputs.mode }}
+          CANONICAL_CANDIDATE_TREE_SHA: ${{ steps.canonical.outputs.tested_tree_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in "${CONNECT_BASE_SHA}" "${CONNECT_BASE_TREE_SHA}" "${SHARED_SHA}" "${SHARED_TREE_SHA}" "${SHARED_PACKAGE_BLOB_SHA}"; do
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [[ "${SHARED_PACKAGE_JSON_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${SHARED_PACKAGE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          [[ "${MODE}" == 'no_change' || "${MODE}" == 'update' || "${MODE}" == 'branch_ready' || "${MODE}" == 'pending_review' ]]
+          if [ "${MODE}" != 'no_change' ]; then
+            [[ "${CANONICAL_CANDIDATE_TREE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          fi
+          printf 'run_identity=%s:%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+          printf 'connect=%s shared=%s shared_tree=%s package_blob=%s package_sha256=%s version=%s canonical_tree=%s mode=%s run=%s:%s\n' \
+            "${CONNECT_BASE_SHA}" "${SHARED_SHA}" "${SHARED_TREE_SHA}" "${SHARED_PACKAGE_BLOB_SHA}" \
+            "${SHARED_PACKAGE_JSON_SHA256}" "${SHARED_PACKAGE_VERSION}" \
+            "${CANONICAL_CANDIDATE_TREE_SHA:-none}" "${MODE}" \
+            "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+
+  gate:
+    name: Test exact reconstructed Connect tree
+    if: needs.discover.outputs.mode == 'update'
+    needs: discover
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    outputs:
+      current: ${{ steps.current.outputs.current }}
+      tested_tree_sha: ${{ steps.candidate.outputs.tested_tree_sha }}
+      lock_sha256: ${{ steps.candidate.outputs.lock_sha256 }}
+      candidate_package_json_sha256: ${{ steps.transport.outputs.candidate_package_json_sha256 }}
+      package_json_b64: ${{ steps.transport.outputs.package_json_b64 }}
+      package_lock_b64: ${{ steps.transport.outputs.package_lock_b64 }}
+    steps:
+      - name: Validate discovery scalars before checkout
+        env:
+          CONNECT_BASE_SHA: ${{ needs.discover.outputs.connect_base_sha }}
+          SHARED_SHA: ${{ needs.discover.outputs.shared_sha }}
+          SHARED_TREE_SHA: ${{ needs.discover.outputs.shared_tree_sha }}
+          SHARED_PACKAGE_BLOB_SHA: ${{ needs.discover.outputs.shared_package_blob_sha }}
+          SHARED_PACKAGE_JSON_SHA256: ${{ needs.discover.outputs.shared_package_json_sha256 }}
+          RUN_IDENTITY: ${{ needs.discover.outputs.run_identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in "${CONNECT_BASE_SHA}" "${SHARED_SHA}" "${SHARED_TREE_SHA}" "${SHARED_PACKAGE_BLOB_SHA}"; do
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [[ "${SHARED_PACKAGE_JSON_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [ "${RUN_IDENTITY}" = "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" ]
+
+      - name: Check out exact discovered Connect commit
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          ref: ${{ needs.discover.outputs.connect_base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+
+      - name: Re-read authoritative public Shared evidence
+        id: shared
+        shell: bash
+        run: node scripts/read-public-shared-source.mjs
+
+      - name: Reject superseded evidence without mutation
+        id: current
+        env:
+          EXPECTED_SHARED_SHA: ${{ needs.discover.outputs.shared_sha }}
+          EXPECTED_SHARED_TREE_SHA: ${{ needs.discover.outputs.shared_tree_sha }}
+          EXPECTED_PACKAGE_SHA256: ${{ needs.discover.outputs.shared_package_json_sha256 }}
+          ACTUAL_SHARED_SHA: ${{ steps.shared.outputs.shared_sha }}
+          ACTUAL_SHARED_TREE_SHA: ${{ steps.shared.outputs.shared_tree_sha }}
+          ACTUAL_PACKAGE_SHA256: ${{ steps.shared.outputs.shared_package_json_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${ACTUAL_SHARED_SHA}" = "${EXPECTED_SHARED_SHA}" ] \
+            && [ "${ACTUAL_SHARED_TREE_SHA}" = "${EXPECTED_SHARED_TREE_SHA}" ] \
+            && [ "${ACTUAL_PACKAGE_SHA256}" = "${EXPECTED_PACKAGE_SHA256}" ]; then
+            echo 'current=true' >>"${GITHUB_OUTPUT}"
+          else
+            echo 'current=false' >>"${GITHUB_OUTPUT}"
+            echo '::notice::Shared advanced during the read-only gate; the next bounded poll will evaluate it'
+          fi
+
+      - name: Reconstruct and install exact Shared package without lifecycle scripts
+        if: steps.current.outputs.current == 'true'
+        id: candidate
+        env:
+          EXPECTED_SHARED_SHA: ${{ needs.discover.outputs.shared_sha }}
+          EXPECTED_SHARED_PACKAGE_JSON_SHA256: ${{ needs.discover.outputs.shared_package_json_sha256 }}
+          EXPECTED_CANONICAL_CANDIDATE_TREE_SHA: ${{ needs.discover.outputs.canonical_candidate_tree_sha }}
+        shell: bash
+        run: node scripts/reconstruct-shared-dependency.mjs --install
+
+      - name: Commit candidate locally for clean-tree testing
+        if: steps.current.outputs.current == 'true'
+        env:
+          EXPECTED_TREE_SHA: ${{ steps.candidate.outputs.tested_tree_sha }}
+          CONNECT_BASE_SHA: ${{ needs.discover.outputs.connect_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "${CONNECT_BASE_SHA}" ]
+          [ "$(git write-tree)" = "${EXPECTED_TREE_SHA}" ]
+          if ! git diff --cached --quiet; then
+            git -c core.hooksPath=/dev/null \
+              -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "chore: pin ssai-shared to ${{ needs.discover.outputs.shared_sha }}"
+          fi
+          [ "$(git rev-parse 'HEAD^{tree}')" = "${EXPECTED_TREE_SHA}" ]
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Run complete Connect production readiness without write permission
+        if: steps.current.outputs.current == 'true'
+        env:
+          EXPECTED_TREE_SHA: ${{ steps.candidate.outputs.tested_tree_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse 'HEAD^{tree}')" = "${EXPECTED_TREE_SHA}" ]
+          project_ref='connectvalidation'
+          header="$(printf '%s' '{"alg":"none","typ":"JWT"}' | base64 --wrap=0 | tr '+/' '-_' | tr -d '=')"
+          payload="$(jq -nc --arg ref "${project_ref}" \
+            '{iss:"supabase",ref:$ref,role:"anon",iat:0,exp:4102444800}' \
+            | base64 --wrap=0 | tr '+/' '-_' | tr -d '=')"
+          export VITE_SUPABASE_URL="https://${project_ref}.supabase.co"
+          export VITE_SUPABASE_ANON_KEY="${header}.${payload}.connect-validation-signature"
+          export VITE_SSAI_BUILD_SHA="$(git rev-parse HEAD)"
+          npm run check
+          EXPECTED_BUILD_SHA="${VITE_SSAI_BUILD_SHA}" node scripts/verify-connect-build-identity-dist.mjs
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          [ "$(git rev-parse 'HEAD^{tree}')" = "${EXPECTED_TREE_SHA}" ]
+
+      - name: Export only the two tested dependency files
+        if: steps.current.outputs.current == 'true'
+        id: transport
+        env:
+          EXPECTED_TREE_SHA: ${{ steps.candidate.outputs.tested_tree_sha }}
+          EXPECTED_LOCK_SHA256: ${{ steps.candidate.outputs.lock_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse 'HEAD^{tree}')" = "${EXPECTED_TREE_SHA}" ]
+          lock_sha256="$(sha256sum package-lock.json | cut -d' ' -f1)"
+          package_sha256="$(sha256sum package.json | cut -d' ' -f1)"
+          [[ "${lock_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${package_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [ "${lock_sha256}" = "${EXPECTED_LOCK_SHA256}" ]
+          package_b64="$(base64 --wrap=0 package.json)"
+          lock_b64="$(base64 --wrap=0 package-lock.json)"
+          [ "${#package_b64}" -le 65536 ]
+          [ "${#lock_b64}" -le 524288 ]
+          printf 'candidate_package_json_sha256=%s\n' "${package_sha256}" >>"${GITHUB_OUTPUT}"
+          printf 'package_json_b64=%s\n' "${package_b64}" >>"${GITHUB_OUTPUT}"
+          printf 'package_lock_b64=%s\n' "${lock_b64}" >>"${GITHUB_OUTPUT}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  publish:
+    name: Create exact tested branch through Git data
+    if: >-
+      needs.discover.outputs.mode == 'update'
+      && needs.gate.result == 'success'
+      && needs.gate.outputs.current == 'true'
+    needs: [discover, gate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      mode: ${{ steps.publish.outputs.mode }}
+      candidate_sha: ${{ steps.publish.outputs.candidate_sha }}
+    steps:
+      - name: Publish tested bytes without checking out or executing candidate code
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECT_BASE_SHA: ${{ needs.discover.outputs.connect_base_sha }}
+          CONNECT_BASE_TREE_SHA: ${{ needs.discover.outputs.connect_base_tree_sha }}
+          SHARED_SHA: ${{ needs.discover.outputs.shared_sha }}
+          SHARED_TREE_SHA: ${{ needs.discover.outputs.shared_tree_sha }}
+          SHARED_PACKAGE_JSON_SHA256: ${{ needs.discover.outputs.shared_package_json_sha256 }}
+          CANONICAL_CANDIDATE_TREE_SHA: ${{ needs.discover.outputs.canonical_candidate_tree_sha }}
+          TESTED_TREE_SHA: ${{ needs.gate.outputs.tested_tree_sha }}
+          LOCK_SHA256: ${{ needs.gate.outputs.lock_sha256 }}
+          CANDIDATE_PACKAGE_JSON_SHA256: ${{ needs.gate.outputs.candidate_package_json_sha256 }}
+          PACKAGE_JSON_B64: ${{ needs.gate.outputs.package_json_b64 }}
+          PACKAGE_LOCK_B64: ${{ needs.gate.outputs.package_lock_b64 }}
+          REVIEW_BRANCH: ${{ needs.discover.outputs.review_branch }}
+          RUN_IDENTITY: ${{ needs.discover.outputs.run_identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in "${CONNECT_BASE_SHA}" "${CONNECT_BASE_TREE_SHA}" "${SHARED_SHA}" "${SHARED_TREE_SHA}" "${TESTED_TREE_SHA}"; do
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [[ "${SHARED_PACKAGE_JSON_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CANONICAL_CANDIDATE_TREE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${LOCK_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_PACKAGE_JSON_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${PACKAGE_JSON_B64}" =~ ^[A-Za-z0-9+/=]+$ ]]
+          [[ "${PACKAGE_LOCK_B64}" =~ ^[A-Za-z0-9+/=]+$ ]]
+          [ "${#PACKAGE_JSON_B64}" -le 65536 ]
+          [ "${#PACKAGE_LOCK_B64}" -le 524288 ]
+          [ "${TESTED_TREE_SHA}" = "${CANONICAL_CANDIDATE_TREE_SHA}" ]
+          [ "${REVIEW_BRANCH}" = "automation/ssai-shared-${SHARED_SHA}-${CONNECT_BASE_SHA}" ]
+          [[ "${REVIEW_BRANCH}" =~ ^automation/ssai-shared-[0-9a-f]{40}-[0-9a-f]{40}$ ]]
+          [ "${RUN_IDENTITY}" = "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" ]
+          umask 077
+          transport_dir="$(mktemp -d "${RUNNER_TEMP}/ssai-shared-tested-bytes.XXXXXX")"
+          cleanup_transport() { rm -rf -- "${transport_dir}"; }
+          trap cleanup_transport EXIT
+          printf '%s' "${PACKAGE_JSON_B64}" | base64 --decode >"${transport_dir}/package.json"
+          printf '%s' "${PACKAGE_LOCK_B64}" | base64 --decode >"${transport_dir}/package-lock.json"
+          [ "$(sha256sum "${transport_dir}/package.json" | cut -d' ' -f1)" = "${CANDIDATE_PACKAGE_JSON_SHA256}" ]
+          [ "$(sha256sum "${transport_dir}/package-lock.json" | cut -d' ' -f1)" = "${LOCK_SHA256}" ]
+          jq -e --arg spec "github:ScaleSmall/SSAI_Shared#${SHARED_SHA}" \
+            '.dependencies["ssai-shared"] == $spec' "${transport_dir}/package.json" >/dev/null
+          jq -e \
+            --arg spec "github:ScaleSmall/SSAI_Shared#${SHARED_SHA}" \
+            --arg ssh "git+ssh://git@github.com/ScaleSmall/SSAI_Shared.git#${SHARED_SHA}" \
+            --arg https "git+https://github.com/ScaleSmall/SSAI_Shared.git#${SHARED_SHA}" '
+              .packages[""].dependencies["ssai-shared"] == $spec
+                and (.packages["node_modules/ssai-shared"].resolved == $ssh
+                  or .packages["node_modules/ssai-shared"].resolved == $https)
+            ' "${transport_dir}/package-lock.json" >/dev/null
+
+          shared_ref="$(curl --fail --silent --show-error --location \
+            --max-time 30 --retry 2 --retry-all-errors \
+            'https://api.github.com/repos/ScaleSmall/SSAI_Shared/git/ref/heads/main')"
+          final_shared_sha="$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${shared_ref}")"
+          [ "${final_shared_sha}" = "${SHARED_SHA}" ]
+          shared_commit="$(curl --fail --silent --show-error --location \
+            --max-time 30 --retry 2 --retry-all-errors \
+            "https://api.github.com/repos/ScaleSmall/SSAI_Shared/git/commits/${SHARED_SHA}")"
+          [ "$(jq -er '.tree.sha' <<<"${shared_commit}")" = "${SHARED_TREE_SHA}" ]
+          curl --fail --silent --show-error --location \
+            --max-time 30 --retry 2 --retry-all-errors \
+            "https://raw.githubusercontent.com/ScaleSmall/SSAI_Shared/${SHARED_SHA}/package.json" \
+            --output "${transport_dir}/shared-package.json"
+          [ "$(sha256sum "${transport_dir}/shared-package.json" | cut -d' ' -f1)" = "${SHARED_PACKAGE_JSON_SHA256}" ]
+
+          connect_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main")"
+          connect_main_sha="$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${connect_ref}")"
+          [ "${connect_main_sha}" = "${CONNECT_BASE_SHA}" ]
+          connect_commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${CONNECT_BASE_SHA}")"
+          [ "$(jq -er '.tree.sha' <<<"${connect_commit}")" = "${CONNECT_BASE_TREE_SHA}" ]
+          matching_refs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${REVIEW_BRANCH}")"
+          jq -e --arg ref "refs/heads/${REVIEW_BRANCH}" \
+            '[.[] | select(.ref == $ref)] | length == 0' <<<"${matching_refs}" >/dev/null
+
+          package_blob="$(jq -n --arg content "${PACKAGE_JSON_B64}" \
+            '{content: $content, encoding: "base64"}' |
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input -)"
+          lock_blob="$(jq -n --arg content "${PACKAGE_LOCK_B64}" \
+            '{content: $content, encoding: "base64"}' |
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input -)"
+          package_blob_sha="$(jq -er '.sha' <<<"${package_blob}")"
+          lock_blob_sha="$(jq -er '.sha' <<<"${lock_blob}")"
+          [[ "${package_blob_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${lock_blob_sha}" =~ ^[0-9a-f]{40}$ ]]
+          tree="$(jq -n \
+            --arg base_tree "${CONNECT_BASE_TREE_SHA}" \
+            --arg package_blob "${package_blob_sha}" \
+            --arg lock_blob "${lock_blob_sha}" '{
+              base_tree: $base_tree,
+              tree: [
+                {path: "package.json", mode: "100644", type: "blob", sha: $package_blob},
+                {path: "package-lock.json", mode: "100644", type: "blob", sha: $lock_blob}
+              ]
+            }' | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/trees" --input -)"
+          created_tree_sha="$(jq -er '.sha' <<<"${tree}")"
+          [ "${created_tree_sha}" = "${TESTED_TREE_SHA}" ]
+          commit="$(jq -n \
+            --arg message "chore: pin ssai-shared to ${SHARED_SHA}" \
+            --arg tree "${TESTED_TREE_SHA}" \
+            --arg parent "${CONNECT_BASE_SHA}" \
+            '{message: $message, tree: $tree, parents: [$parent]}' |
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/commits" --input -)"
+          candidate_sha="$(jq -er '.sha' <<<"${commit}")"
+          [[ "${candidate_sha}" =~ ^[0-9a-f]{40}$ ]]
+          jq -e --arg sha "${candidate_sha}" --arg tree "${TESTED_TREE_SHA}" --arg parent "${CONNECT_BASE_SHA}" '
+            .sha == $sha and .tree.sha == $tree and (.parents | length) == 1 and .parents[0].sha == $parent
+          ' <<<"${commit}" >/dev/null
+          final_connect_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main")"
+          [ "$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${final_connect_ref}")" = "${CONNECT_BASE_SHA}" ]
+          final_matching_refs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${REVIEW_BRANCH}")"
+          jq -e --arg ref "refs/heads/${REVIEW_BRANCH}" \
+            '[.[] | select(.ref == $ref)] | length == 0' <<<"${final_matching_refs}" >/dev/null
+          created_ref="$(jq -n \
+            --arg ref "refs/heads/${REVIEW_BRANCH}" \
+            --arg sha "${candidate_sha}" \
+            '{ref: $ref, sha: $sha}' |
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" --input -)"
+          jq -e --arg ref "refs/heads/${REVIEW_BRANCH}" --arg sha "${candidate_sha}" '
+            .ref == $ref and .object.type == "commit" and .object.sha == $sha
+          ' <<<"${created_ref}" >/dev/null
+          remote_commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${candidate_sha}")"
+          jq -e --arg sha "${candidate_sha}" --arg tree "${TESTED_TREE_SHA}" --arg parent "${CONNECT_BASE_SHA}" '
+            .sha == $sha and .tree.sha == $tree and (.parents | length) == 1 and .parents[0].sha == $parent
+          ' <<<"${remote_commit}" >/dev/null
+          printf 'candidate_sha=%s\n' "${candidate_sha}" >>"${GITHUB_OUTPUT}"
+          echo 'mode=published' >>"${GITHUB_OUTPUT}"
+          cleanup_transport
+          trap - EXIT
+          printf 'published review_branch=%s candidate=%s parent=%s tree=%s shared=%s package_sha256=%s run=%s:%s\n' \
+            "${REVIEW_BRANCH}" "${candidate_sha}" "${CONNECT_BASE_SHA}" "${TESTED_TREE_SHA}" \
+            "${SHARED_SHA}" "${SHARED_PACKAGE_JSON_SHA256}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+
+  open-review:
+    name: Publish or repair exact gated candidate for human review
+    if: >-
+      always()
+      && needs.discover.result == 'success'
+      && (
+        needs.discover.outputs.mode == 'pending_review'
+        || (
+          needs.branch-gate.result == 'success'
+          && needs.branch-gate.outputs.mode == 'validated'
+          && (
+            needs.discover.outputs.mode == 'branch_ready'
+            || (
+              needs.discover.outputs.mode == 'update'
+              && needs.publish.result == 'success'
+              && needs.publish.outputs.mode == 'published'
+            )
+          )
+        )
+      )
+    needs: [discover, gate, publish, branch-gate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    outputs:
+      candidate_sha: ${{ steps.review.outputs.candidate_sha }}
+      pull_request_number: ${{ steps.review.outputs.pull_request_number }}
+    steps:
+      - name: Create, repair, or verify one exact pull request without checking out code
+        id: review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECT_BASE_SHA: ${{ needs.discover.outputs.connect_base_sha }}
+          SHARED_SHA: ${{ needs.discover.outputs.shared_sha }}
+          REVIEW_BRANCH: ${{ needs.discover.outputs.review_branch }}
+          CANDIDATE_SHA: ${{ needs.discover.outputs.review_candidate_sha || needs.branch-gate.outputs.candidate_sha }}
+          CANONICAL_CANDIDATE_TREE_SHA: ${{ needs.discover.outputs.canonical_candidate_tree_sha }}
+          BRANCH_GATE_RUN_ID: ${{ needs.discover.outputs.review_branch_gate_run_id || needs.branch-gate.outputs.branch_gate_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CONNECT_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SHARED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CANONICAL_CANDIDATE_TREE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${BRANCH_GATE_RUN_ID}" =~ ^[0-9]+$ ]]
+          [ "${REVIEW_BRANCH}" = "automation/ssai-shared-${SHARED_SHA}-${CONNECT_BASE_SHA}" ]
+          [[ "${REVIEW_BRANCH}" =~ ^automation/ssai-shared-[0-9a-f]{40}-[0-9a-f]{40}$ ]]
+          workflow_id=289102321
+          workflow_path='.github/workflows/validate.yml'
+          correlation="shared-${SHARED_SHA}-${CANDIDATE_SHA}"
+          expected_title="Validate Connect app [${correlation}]"
+          encoded_branch="$(jq -rn --arg value "${REVIEW_BRANCH}" '$value | @uri')"
+
+          workflow="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}")"
+          jq -e --arg path "${workflow_path}" \
+            '.state == "active" and .path == $path' <<<"${workflow}" >/dev/null
+          gate_runs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=workflow_dispatch&branch=${encoded_branch}&per_page=100")"
+          gate_matches="$(jq -c \
+            --arg sha "${CANDIDATE_SHA}" \
+            --arg branch "${REVIEW_BRANCH}" \
+            --arg title "${expected_title}" \
+            --arg path "${workflow_path}" '
+              [.workflow_runs[] |
+                select(.event == "workflow_dispatch"
+                  and .head_sha == $sha
+                  and .head_branch == $branch
+                  and .display_title == $title
+                  and .path == $path)]
+            ' <<<"${gate_runs}")"
+          if [ "$(jq -r 'length' <<<"${gate_matches}")" -ne 1 ]; then
+            echo '::error::Expected exactly one successful explicit branch gate before publishing a PR'
+            exit 1
+          fi
+          [ "$(jq -er '.[0].id' <<<"${gate_matches}")" = "${BRANCH_GATE_RUN_ID}" ]
+          gate_run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${BRANCH_GATE_RUN_ID}")"
+          jq -e \
+            --argjson id "${BRANCH_GATE_RUN_ID}" \
+            --arg sha "${CANDIDATE_SHA}" \
+            --arg branch "${REVIEW_BRANCH}" \
+            --arg title "${expected_title}" \
+            --arg path "${workflow_path}" '
+              .id == $id
+                and .event == "workflow_dispatch"
+                and .head_sha == $sha
+                and .head_branch == $branch
+                and .display_title == $title
+                and .path == $path
+                and .run_attempt == 1
+                and .status == "completed"
+                and .conclusion == "success"
+                and .actor.login == "github-actions[bot]"
+                and .triggering_actor.login == "github-actions[bot]"
+            ' <<<"${gate_run}" >/dev/null
+
+          main_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main")"
+          [ "$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${main_ref}")" = "${CONNECT_BASE_SHA}" ]
+          branch_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${REVIEW_BRANCH}")"
+          jq -e --arg sha "${CANDIDATE_SHA}" \
+            '.object.type == "commit" and .object.sha == $sha' <<<"${branch_ref}" >/dev/null
+          candidate_commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${CANDIDATE_SHA}")"
+          jq -e --arg sha "${CANDIDATE_SHA}" --arg parent "${CONNECT_BASE_SHA}" --arg tree "${CANONICAL_CANDIDATE_TREE_SHA}" '
+            .sha == $sha
+              and (.parents | length) == 1
+              and .parents[0].sha == $parent
+              and .tree.sha == $tree
+          ' <<<"${candidate_commit}" >/dev/null
+          comparison="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${CONNECT_BASE_SHA}...${CANDIDATE_SHA}")"
+          jq -e '
+            .status == "ahead"
+              and .ahead_by == 1
+              and .behind_by == 0
+              and (.commits | length) == 1
+              and ([.files[].filename] | sort) == ["package-lock.json", "package.json"]
+          ' <<<"${comparison}" >/dev/null
+
+          expected_spec="github:ScaleSmall/SSAI_Shared#${SHARED_SHA}"
+          expected_ssh="git+ssh://git@github.com/ScaleSmall/SSAI_Shared.git#${SHARED_SHA}"
+          expected_https="git+https://github.com/ScaleSmall/SSAI_Shared.git#${SHARED_SHA}"
+          package_payload="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/contents/package.json?ref=${CANDIDATE_SHA}")"
+          lock_payload="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/contents/package-lock.json?ref=${CANDIDATE_SHA}")"
+          package_json="$(jq -er 'select(.type == "file" and .encoding == "base64") | .content' \
+            <<<"${package_payload}" | base64 --decode)"
+          package_lock="$(jq -er 'select(.type == "file" and .encoding == "base64") | .content' \
+            <<<"${lock_payload}" | base64 --decode)"
+          jq -e --arg spec "${expected_spec}" \
+            '.dependencies["ssai-shared"] == $spec' <<<"${package_json}" >/dev/null
+          jq -e \
+            --arg spec "${expected_spec}" \
+            --arg ssh "${expected_ssh}" \
+            --arg https "${expected_https}" '
+              .packages[""].dependencies["ssai-shared"] == $spec
+                and (.packages["node_modules/ssai-shared"].resolved == $ssh
+                  or .packages["node_modules/ssai-shared"].resolved == $https)
+            ' <<<"${package_lock}" >/dev/null
+
+          reviewer='tylan-scale-small'
+          reviewer_permission="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/collaborators/${reviewer}/permission")"
+          jq -e --arg login "${reviewer}" '
+            .user.login == $login
+              and .user.type == "User"
+              and (.permission == "admin"
+                or .permission == "maintain"
+                or .permission == "write")
+          ' <<<"${reviewer_permission}" >/dev/null
+          echo "approval path preflight reviewer=${reviewer} permission=$(jq -er '.permission' <<<"${reviewer_permission}") exact_head=${CANDIDATE_SHA}"
+
+          target_prefix="automation/ssai-shared-${SHARED_SHA}-"
+          pull_pages="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100")"
+          matching_pulls="$(jq -c \
+            --arg prefix "${target_prefix}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              [add[] |
+                select(.head.repo.full_name == $repository
+                  and (.head.ref | startswith($prefix)))]
+            ' <<<"${pull_pages}")"
+          pull_count="$(jq -r 'length' <<<"${matching_pulls}")"
+          if [ "${pull_count}" -gt 1 ]; then
+            echo '::error::More than one open PR exists for the immutable Shared target'
+            exit 1
+          fi
+          if [ "${pull_count}" -eq 1 ]; then
+            pull="$(jq -c '.[0]' <<<"${matching_pulls}")"
+            jq -e \
+              --arg head "${REVIEW_BRANCH}" \
+              --arg sha "${CANDIDATE_SHA}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                .state == "open"
+                  and .base.ref == "main"
+                  and .head.ref == $head
+                  and .head.sha == $sha
+                  and .head.repo.full_name == $repository
+                  and .draft == false
+              ' <<<"${pull}" >/dev/null
+          else
+            title="chore: pin ssai-shared to ${SHARED_SHA}"
+            body="$(printf '%s\n\n%s\n%s\n%s\n' \
+              'Automated immutable dependency reconstruction; human review and merge are mandatory.' \
+              "Shared commit: \`${SHARED_SHA}\`" \
+              "Connect source base: \`${CONNECT_BASE_SHA}\`" \
+              "Candidate commit: \`${CANDIDATE_SHA}\`")"
+            pull_error="$(mktemp)"
+            if ! pull="$(jq -n \
+              --arg title "${title}" \
+              --arg head "${REVIEW_BRANCH}" \
+              --arg base 'main' \
+              --arg body "${body}" \
+              '{title: $title, head: $head, base: $base, body: $body, draft: false}' |
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/pulls" --input - \
+                2>"${pull_error}")"; then
+              api_error="$(cat "${pull_error}")"
+              rm -f "${pull_error}"
+              if grep -Fqi 'GitHub Actions is not permitted to create or approve pull requests' \
+                <<<"${api_error}"; then
+                echo '::error::Repository Settings > Actions > General must allow GitHub Actions to create and approve pull requests'
+              else
+                printf '::error::Exact pull-request creation failed: %s\n' "${api_error}"
+              fi
+              exit 1
+            fi
+            rm -f "${pull_error}"
+          fi
+
+          pull_number="$(jq -er '.number' <<<"${pull}")"
+          [[ "${pull_number}" =~ ^[0-9]+$ ]]
+          exact_pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_number}")"
+          jq -e \
+            --arg head "${REVIEW_BRANCH}" \
+            --arg sha "${CANDIDATE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .state == "open"
+                and .base.ref == "main"
+                and .head.ref == $head
+                and .head.sha == $sha
+                and .head.repo.full_name == $repository
+                and .draft == false
+            ' <<<"${exact_pull}" >/dev/null
+          pull_files="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pull_number}/files?per_page=100")"
+          jq -e '
+            ([add[].filename] | sort) == ["package-lock.json", "package.json"]
+          ' <<<"${pull_files}" >/dev/null
+
+          review_pages="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pull_number}/reviews?per_page=100")"
+          latest_decisive_state="$(jq -r \
+            --arg reviewer "${reviewer}" \
+            --arg head "${CANDIDATE_SHA}" '
+              [add[] |
+                select(.commit_id == $head
+                  and .user.type == "User"
+                  and .user.login == $reviewer
+                  and (.state == "APPROVED"
+                    or .state == "CHANGES_REQUESTED"
+                    or .state == "DISMISSED"))]
+              | sort_by([.submitted_at // "", .id])
+              | if length == 0 then "" else .[-1].state end
+            ' <<<"${review_pages}")"
+
+          if [ "${latest_decisive_state}" = 'APPROVED' ]; then
+            echo "exact-head approval already present reviewer=${reviewer} candidate=${CANDIDATE_SHA}; review request unchanged"
+          else
+            requested_reviewers_before="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pull_number}/requested_reviewers")"
+            if ! jq -e --arg reviewer "${reviewer}" '
+              [.users[]? |
+                select(.type == "User") |
+                .login] | index($reviewer) != null
+            ' <<<"${requested_reviewers_before}" >/dev/null; then
+              jq -n --arg reviewer "${reviewer}" \
+                '{reviewers: [$reviewer]}' |
+                gh api --method POST \
+                  "repos/${GITHUB_REPOSITORY}/pulls/${pull_number}/requested_reviewers" --input - \
+                  >/dev/null
+            fi
+            requested_reviewers_after="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pull_number}/requested_reviewers")"
+            jq -e --arg reviewer "${reviewer}" '
+              [.users[]? |
+                select(.type == "User") |
+                .login] | index($reviewer) != null
+            ' <<<"${requested_reviewers_after}" >/dev/null
+          fi
+
+          automatic_pull_run_id=''
+          automatic_pull_state=''
+          for _ in $(seq 1 60); do
+            pull_runs="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=pull_request&head_sha=${CANDIDATE_SHA}&per_page=100")"
+            pull_matches="$(jq -c \
+              --arg sha "${CANDIDATE_SHA}" \
+              --arg branch "${REVIEW_BRANCH}" \
+              --arg path "${workflow_path}" '
+                [.workflow_runs[] |
+                  select(.event == "pull_request"
+                    and .head_sha == $sha
+                    and .head_branch == $branch
+                    and .path == $path)]
+              ' <<<"${pull_runs}")"
+            pull_run_count="$(jq -r 'length' <<<"${pull_matches}")"
+            if [ "${pull_run_count}" -gt 1 ]; then
+              echo '::error::More than one automatic pull-request gate matched the immutable candidate'
+              exit 1
+            fi
+            if [ "${pull_run_count}" -eq 1 ]; then
+              automatic_pull_run_id="$(jq -er '.[0].id' <<<"${pull_matches}")"
+              automatic_pull_state="$(jq -r '.[0] | "\(.status):\(.conclusion // "")"' <<<"${pull_matches}")"
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "${automatic_pull_run_id}" ]; then
+            echo '::error::The ready PR was published but its exact automatic pull-request gate did not become observable'
+            exit 1
+          fi
+          [[ "${automatic_pull_run_id}" =~ ^[0-9]+$ ]]
+          case "${automatic_pull_state}" in
+            completed:action_required)
+              echo "::notice::Automatic PR gate ${automatic_pull_run_id} awaits human workflow approval and is not release evidence"
+              ;;
+            completed:success)
+              echo "automatic PR gate ${automatic_pull_run_id} independently completed green"
+              ;;
+            queued:|in_progress:|requested:|waiting:|pending:)
+              echo "::notice::Automatic PR gate ${automatic_pull_run_id} is ${automatic_pull_state%%:*} and is not release evidence"
+              ;;
+            *)
+              echo "::error::Automatic PR gate ${automatic_pull_run_id} has unexpected state ${automatic_pull_state}"
+              exit 1
+              ;;
+          esac
+
+          printf 'candidate_sha=%s\n' "${CANDIDATE_SHA}" >>"${GITHUB_OUTPUT}"
+          printf 'pull_request_number=%s\n' "${pull_number}" >>"${GITHUB_OUTPUT}"
+          {
+            echo '### Shared dependency update is ready for human review'
+            echo
+            printf -- '- Pull request: #%s\n' "${pull_number}"
+            printf -- '- Candidate commit: `%s`\n' "${CANDIDATE_SHA}"
+            printf -- '- Canonical candidate tree: `%s`\n' "${CANONICAL_CANDIDATE_TREE_SHA}"
+            printf -- '- Shared commit: `%s`\n' "${SHARED_SHA}"
+            printf -- '- Exact branch gate run: `%s`\n' "${BRANCH_GATE_RUN_ID}"
+            printf -- '- Requested eligible reviewer: `%s`\n' "${reviewer}"
+            printf -- '- Automatic PR gate (approval-required/non-authoritative): `%s` (`%s`)\n' \
+              "${automatic_pull_run_id}" "${automatic_pull_state}"
+            echo '- The ready PR was created only after the exact explicit gate reached terminal success.'
+            echo '- A distinct human must approve and merge; automation cannot approve or merge.'
+          } >>"${GITHUB_STEP_SUMMARY}"
+          printf 'human review required pr=%s branch=%s candidate=%s base=%s shared=%s branch_gate=%s automatic_pr_gate=%s:%s\n' \
+            "${pull_number}" "${REVIEW_BRANCH}" "${CANDIDATE_SHA}" "${CONNECT_BASE_SHA}" "${SHARED_SHA}" \
+            "${BRANCH_GATE_RUN_ID}" "${automatic_pull_run_id}" "${automatic_pull_state}"
+
+  branch-gate:
+    name: Dispatch exact read-only branch gate
+    if: >-
+      always()
+      && needs.discover.result == 'success'
+      && (
+        needs.discover.outputs.mode == 'branch_ready'
+        || (
+          needs.discover.outputs.mode == 'update'
+          && needs.gate.result == 'success'
+          && needs.gate.outputs.current == 'true'
+          && needs.publish.result == 'success'
+          && needs.publish.outputs.mode == 'published'
+        )
+      )
+    needs: [discover, gate, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.gate.outputs.mode }}
+      candidate_sha: ${{ steps.gate.outputs.candidate_sha }}
+      branch_gate_run_id: ${{ steps.gate.outputs.branch_gate_run_id }}
+    steps:
+      - name: Recover or dispatch the exact immutable candidate gate without checking out code
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECT_BASE_SHA: ${{ needs.discover.outputs.connect_base_sha }}
+          SHARED_SHA: ${{ needs.discover.outputs.shared_sha }}
+          REVIEW_BRANCH: ${{ needs.discover.outputs.review_branch }}
+          CANDIDATE_SHA: ${{ needs.discover.outputs.review_candidate_sha || needs.publish.outputs.candidate_sha }}
+          CANONICAL_CANDIDATE_TREE_SHA: ${{ needs.discover.outputs.canonical_candidate_tree_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow_id=289102321
+          workflow_path='.github/workflows/validate.yml'
+          [[ "${CONNECT_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SHARED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CANONICAL_CANDIDATE_TREE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [ "${REVIEW_BRANCH}" = "automation/ssai-shared-${SHARED_SHA}-${CONNECT_BASE_SHA}" ]
+          [[ "${REVIEW_BRANCH}" =~ ^automation/ssai-shared-[0-9a-f]{40}-[0-9a-f]{40}$ ]]
+          correlation="shared-${SHARED_SHA}-${CANDIDATE_SHA}"
+          [[ "${correlation}" =~ ^shared-[0-9a-f]{40}-[0-9a-f]{40}$ ]]
+          expected_title="Validate Connect app [${correlation}]"
+          encoded_branch="$(jq -rn --arg value "${REVIEW_BRANCH}" '$value | @uri')"
+
+          validate_candidate_boundary() {
+            local main_ref branch_ref candidate_commit
+            main_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main")"
+            [ "$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"${main_ref}")" = "${CONNECT_BASE_SHA}" ]
+            branch_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${REVIEW_BRANCH}")"
+            jq -e --arg sha "${CANDIDATE_SHA}" \
+              '.object.type == "commit" and .object.sha == $sha' <<<"${branch_ref}" >/dev/null
+            candidate_commit="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${CANDIDATE_SHA}")"
+            jq -e \
+              --arg sha "${CANDIDATE_SHA}" \
+              --arg parent "${CONNECT_BASE_SHA}" \
+              --arg tree "${CANONICAL_CANDIDATE_TREE_SHA}" '
+                .sha == $sha
+                  and (.parents | length) == 1
+                  and .parents[0].sha == $parent
+                  and .tree.sha == $tree
+              ' <<<"${candidate_commit}" >/dev/null
+          }
+
+          assert_no_open_review() {
+            local phase="$1" pull_pages matching_pulls pull_count
+            pull_pages="$(gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100")"
+            matching_pulls="$(jq -c \
+              --arg branch "${REVIEW_BRANCH}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [add[] |
+                  select(.head.repo.full_name == $repository
+                    and .head.ref == $branch)]
+              ' <<<"${pull_pages}")"
+            pull_count="$(jq -r 'length' <<<"${matching_pulls}")"
+            if [ "${pull_count}" -ne 0 ]; then
+              echo "::error::The exact immutable review branch has ${pull_count} open PR(s) during ${phase}"
+              echo '::error::A ready PR must not exist until the exact branch gate is terminal green'
+              exit 1
+            fi
+            printf 'verified no open review phase=%s branch=%s candidate=%s\n' \
+              "${phase}" "${REVIEW_BRANCH}" "${CANDIDATE_SHA}"
+          }
+
+          inventory_gate() {
+            local runs matches count
+            runs="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=workflow_dispatch&branch=${encoded_branch}&per_page=100")"
+            matches="$(jq -c \
+              --arg sha "${CANDIDATE_SHA}" \
+              --arg branch "${REVIEW_BRANCH}" \
+              --arg title "${expected_title}" \
+              --arg path "${workflow_path}" '
+                [.workflow_runs[] |
+                  select(.event == "workflow_dispatch"
+                    and .head_sha == $sha
+                    and .head_branch == $branch
+                    and .display_title == $title
+                    and .path == $path)]
+              ' <<<"${runs}")"
+            count="$(jq -r 'length' <<<"${matches}")"
+            if [ "${count}" -gt 1 ]; then
+              echo '::error::Multiple branch-gate runs matched the immutable candidate correlation'
+              exit 1
+            fi
+            if [ "${count}" -eq 1 ]; then
+              run_id="$(jq -er '.[0].id' <<<"${matches}")"
+              [[ "${run_id}" =~ ^[0-9]+$ ]]
+            else
+              run_id=''
+            fi
+          }
+
+          validate_gate_run() {
+            local candidate_run="$1"
+            jq -e \
+              --arg sha "${CANDIDATE_SHA}" \
+              --arg branch "${REVIEW_BRANCH}" \
+              --arg title "${expected_title}" \
+              --arg path "${workflow_path}" '
+                .event == "workflow_dispatch"
+                  and .head_sha == $sha
+                  and .head_branch == $branch
+                  and .display_title == $title
+                  and .path == $path
+                  and .run_attempt == 1
+                  and .actor.login == "github-actions[bot]"
+                  and .triggering_actor.login == "github-actions[bot]"
+              ' <<<"${candidate_run}" >/dev/null
+          }
+
+          validate_candidate_boundary
+          workflow="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}")"
+          jq -e --arg path "${workflow_path}" \
+            '.state == "active" and .path == $path' <<<"${workflow}" >/dev/null
+          assert_no_open_review before-gate
+
+          run_id=''
+          inventory_gate
+          if [ -z "${run_id}" ]; then
+            jq -n \
+              --arg ref "${REVIEW_BRANCH}" \
+              --arg correlation "${correlation}" \
+              '{ref: $ref, inputs: {release_proof_id: $correlation}}' |
+              gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/dispatches" --input -
+            for _ in $(seq 1 60); do
+              inventory_gate
+              [ -n "${run_id}" ] && break
+              sleep 5
+            done
+            if [ -z "${run_id}" ]; then
+              echo '::error::The exact branch-gate dispatch was accepted but its run did not become observable'
+              exit 1
+            fi
+          else
+            printf 'recovered exact branch gate run=%s correlation=%s\n' \
+              "${run_id}" "${correlation}"
+          fi
+          [[ "${run_id}" =~ ^[0-9]+$ ]]
+
+          last_state=''
+          gate_succeeded=0
+          for _ in $(seq 1 210); do
+            run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+            validate_gate_run "${run}"
+            status="$(jq -r '.status' <<<"${run}")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"${run}")"
+            attempt="$(jq -er '.run_attempt' <<<"${run}")"
+            state="${status}:${conclusion}:attempt-${attempt}"
+            if [ "${state}" != "${last_state}" ]; then
+              printf 'branch gate run=%s state=%s candidate=%s\n' "${run_id}" "${state}" "${CANDIDATE_SHA}"
+              last_state="${state}"
+            fi
+            if [ "${status}" = 'completed' ]; then
+              if [ "${conclusion}" = 'success' ]; then
+                gate_succeeded=1
+                break
+              fi
+              echo "::error::Exact branch gate ${run_id} concluded ${conclusion}; immutable failures are not rerun"
+              exit 1
+            fi
+            sleep 10
+          done
+          if [ "${gate_succeeded}" -ne 1 ]; then
+            echo "::error::Exact branch gate ${run_id} did not reach terminal success"
+            exit 1
+          fi
+
+          run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+          validate_gate_run "${run}"
+          jq -e '.status == "completed" and .conclusion == "success"' <<<"${run}" >/dev/null
+          validate_candidate_boundary
+          assert_no_open_review after-gate
+          printf 'mode=validated\n' >>"${GITHUB_OUTPUT}"
+          printf 'candidate_sha=%s\n' "${CANDIDATE_SHA}" >>"${GITHUB_OUTPUT}"
+          printf 'branch_gate_run_id=%s\n' "${run_id}" >>"${GITHUB_OUTPUT}"
+          {
+            echo '### Exact Shared candidate gate passed before PR publication'
+            echo
+            printf -- '- Candidate commit: `%s`\n' "${CANDIDATE_SHA}"
+            printf -- '- Canonical candidate tree: `%s`\n' "${CANONICAL_CANDIDATE_TREE_SHA}"
+            printf -- '- Shared commit: `%s`\n' "${SHARED_SHA}"
+            printf -- '- Exact branch gate run: `%s`\n' "${run_id}"
+            echo '- No pull request existed or was mutated by this job.'
+            echo '- The isolated PR publisher must independently revalidate this exact terminal success.'
+          } >>"${GITHUB_STEP_SUMMARY}"
+          printf 'validated candidate=%s shared=%s branch_gate=%s before_pr=true\n' \
+            "${CANDIDATE_SHA}" "${SHARED_SHA}" "${run_id}"

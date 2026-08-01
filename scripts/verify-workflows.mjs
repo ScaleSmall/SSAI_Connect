@@ -3,30 +3,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const workflowDir = path.join(process.cwd(), '.github', 'workflows');
-const workflows = [
-  {
-    file: 'validate.yml',
-    write: false,
-    requireCheck: true,
-  },
-  {
-    file: 'update-shared.yml',
-    write: false,
-    requireCheck: true,
-  },
-];
-
 const failures = [];
 
-for (const workflow of workflows) {
-  const fullPath = path.join(workflowDir, workflow.file);
-  if (!existsSync(fullPath)) {
-    failures.push(`${workflow.file}: missing workflow`);
-    continue;
-  }
-  const text = readFileSync(fullPath, 'utf8');
-  checkWorkflow(workflow.file, text, workflow);
-}
+const validate = readWorkflow('validate.yml');
+const retired = readWorkflow('update-shared.yml');
+readWorkflow('pull-shared-with-protected-evidence.yml');
+readWorkflow('prove-shared-update-release.yml');
+
+if (validate) verifyValidateWorkflow(validate);
+if (retired) verifyRetiredWorkflow(retired);
 
 if (failures.length) {
   console.error('[workflows] SSAI_Connect workflow hardening failed:');
@@ -36,100 +21,79 @@ if (failures.length) {
 
 console.log('[workflows] SSAI_Connect workflows hardened');
 
-function checkWorkflow(file, text, { write, requireCheck }) {
-  if (/runs-on:\s*ubuntu-latest\b/i.test(text)) {
-    failures.push(`${file}: use ubuntu-24.04 instead of ubuntu-latest`);
+function readWorkflow(file) {
+  const fullPath = path.join(workflowDir, file);
+  if (!existsSync(fullPath)) {
+    failures.push(`${file}: missing workflow`);
+    return '';
   }
-  if (/node-version:\s*['"]?2[02]['"]?\b/i.test(text)) {
-    failures.push(`${file}: use Node 24 for validation/build parity`);
-  }
-  if (!/node-version:\s*['"]?24['"]?\b/i.test(text)) {
-    failures.push(`${file}: missing Node 24 setup`);
-  }
-  if (/actions\/(?:checkout|setup-node)@v\d+/i.test(text)) {
-    failures.push(`${file}: pin GitHub actions by commit SHA, not floating version tags`);
-  }
+  return readFileSync(fullPath, 'utf8');
+}
+
+function verifyValidateWorkflow(text) {
+  const file = 'validate.yml';
+  verifyPinnedRuntime(file, text);
+  requireMatch(file, text, /^on:\r?\n {2}workflow_dispatch:\r?\n/m,
+    'must expose the exact correlated workflow_dispatch gate');
+  requireMatch(file, text, /release_proof_id:[\s\S]*?required:\s*true/,
+    'release_proof_id must be mandatory');
+  requireMatch(file, text, /^ {2}pull_request:\s*\r?\n {2}push:\r?\n {4}branches:\s*\[main\]/m,
+    'must retain pull-request and protected-main validation');
+  requireMatch(file, text, /permissions:\r?\n {2}contents:\s*read\b/,
+    'must declare read-only contents permission');
+  requireMatch(file, text, /DISPATCH_ACTOR[\s\S]*github-actions\[bot\]/,
+    'explicit release dispatch must bind the repository Actions bot');
+  requireMatch(file, text, /DISPATCH_TRIGGERING_ACTOR[\s\S]*github-actions\[bot\]/,
+    'explicit release retriggers must remain bot-owned');
+  requireMatch(file, text, /Create nonsecret validation-only browser configuration/,
+    'must construct only synthetic validation browser configuration');
+  requireMatch(file, text, /npm ci --ignore-scripts --audit=false --fund=false/,
+    'dependency installation must remain public and lifecycle-script free');
+  requireMatch(file, text, /npm run check\b/,
+    'must run the complete production-readiness check');
+  requireMatch(file, text, /verify-connect-build-identity-dist\.mjs/,
+    'must verify the exact candidate build identity');
+  forbid(file, text, /secrets\./, 'must not expose repository secrets to candidate validation');
+  forbid(file, text, /SCALESMALL_PAT/, 'must not depend on the retired cross-repository PAT');
+  forbid(file, text, /pull-requests:\s*write|contents:\s*write|actions:\s*write/,
+    'validation must not receive write permission');
+}
+
+function verifyRetiredWorkflow(text) {
+  const file = 'update-shared.yml';
+  requireMatch(file, text, /^name:\s*Retired legacy Shared package consumer\s*$/m,
+    'must retain an explicit retired identity');
+  requireMatch(file, text, /^on:\r?\n {2}workflow_dispatch:\s*\r?\n/m,
+    'must be manual-only and inert');
+  requireMatch(file, text, /^permissions:\s*\{\}\s*$/m,
+    'must grant no workflow permission');
+  requireMatch(file, text, /if:\s*\$\{\{\s*false\s*\}\}/,
+    'retired job must be unconditionally skipped');
+  for (const [pattern, reason] of [
+    [/repository_dispatch/, 'must not accept the retired producer dispatch'],
+    [/SCALESMALL_PAT|secrets\./, 'must not consume secrets'],
+    [/contents:\s*write|pull-requests:\s*write|actions:\s*write/, 'must not hold write permission'],
+    [/\bgit\s+push\b|\bgh\s+pr\b|\bnpm\s+(?:ci|install|run)\b/, 'must not author, execute, or publish code'],
+  ]) forbid(file, text, pattern, reason);
+}
+
+function verifyPinnedRuntime(file, text) {
+  forbid(file, text, /runs-on:\s*ubuntu-latest\b/i, 'use ubuntu-24.04 instead of ubuntu-latest');
+  requireMatch(file, text, /runs-on:\s*ubuntu-24\.04\b/,
+    'missing pinned Ubuntu runner');
+  requireMatch(file, text, /node-version:\s*['"]?24['"]?\b/,
+    'missing Node 24 setup');
+  forbid(file, text, /actions\/(?:checkout|setup-node)@v\d+/i,
+    'pin GitHub actions by commit SHA, not floating version tags');
   if (/actions\/checkout@/i.test(text) && !/persist-credentials:\s*false\b/i.test(text)) {
     failures.push(`${file}: checkout must set persist-credentials: false`);
   }
-  const permissionPattern = write
-    ? /permissions:\s*\r?\n\s*contents:\s*write\b/i
-    : /permissions:\s*\r?\n\s*contents:\s*read\b/i;
-  if (!permissionPattern.test(text)) {
-    failures.push(`${file}: workflow must declare ${write ? 'write' : 'read-only'} contents permission`);
-  }
-  if (requireCheck && !/npm run check\b/.test(text)) {
-    failures.push(`${file}: workflow must run npm run check`);
-  }
-  if (file === 'update-shared.yml') {
-    if (/pull-requests:\s*write\b/i.test(text)) {
-      failures.push(`${file}: the repository token must remain read-only`);
-    }
-    if (/GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/.test(text)) {
-      failures.push(`${file}: repository GITHUB_TOKEN writes would suppress required PR checks`);
-    }
-    const patAuthoringBindings = text.match(
-      /GH_TOKEN:\s*\$\{\{\s*secrets\.SCALESMALL_PAT\s*\}\}/g,
-    ) ?? [];
-    if (patAuthoringBindings.length < 3) {
-      failures.push(`${file}: branch, rebase, and PR writes must use the existing automation PAT`);
-    }
-    if (!/gh pr create\b/.test(text)) {
-      failures.push(`${file}: dependency automation must open a protected pull request`);
-    }
-    if (!/--base\s+main\b/.test(text)) {
-      failures.push(`${file}: dependency automation pull requests must target main`);
-    }
-    const branchAssignments = [
-      ...text.matchAll(/^\s*branch="([^"]+)"\s*$/gm),
-    ].map((match) => match[1]);
-    if (
-      branchAssignments.length === 0
-      || branchAssignments.some((branch) => branch !== 'automation/update-shared')
-    ) {
-      failures.push(`${file}: dependency automation must reuse one bounded branch`);
-    }
-    if (!/gh pr list[\s\S]*--state\s+open/.test(text)) {
-      failures.push(`${file}: dependency automation must update an existing open pull request`);
-    }
-    if (!/git rev-list --count origin\/main\.\.HEAD/.test(text)) {
-      failures.push(`${file}: dependency automation must recover an existing unmerged branch`);
-    }
-    if (!/HEAD:refs\/heads\/\$branch\b/.test(text)) {
-      failures.push(`${file}: dependency automation must push only its generated branch`);
-    }
-    if (
-      !/remote_branch_sha="\$\(/
-        .test(text)
-      || !/--force-with-lease="refs\/heads\/\$branch:\$REMOTE_BRANCH_SHA"/.test(text)
-    ) {
-      failures.push(`${file}: persistent automation branch updates must use an exact force-with-lease`);
-    }
-    const localCommitIndex = text.indexOf('git commit -m "chore: update ssai-shared dependency"');
-    const fullCheckIndex = text.indexOf('run: npm run check');
-    const remotePushIndex = text.indexOf('HEAD:refs/heads/$branch');
-    if (
-      localCommitIndex === -1
-      || fullCheckIndex === -1
-      || remotePushIndex === -1
-      || !(localCommitIndex < fullCheckIndex && fullCheckIndex < remotePushIndex)
-    ) {
-      failures.push(`${file}: local commit must precede the full clean-tree check and remote push`);
-    }
-    if (
-      /^\s*git\s+push\b[^\r\n]*(?:\s|:)main(?:\s|$)/im.test(text)
-      || /^\s*git\s+push\s*$/im.test(text)
-    ) {
-      failures.push(`${file}: dependency automation must never push directly to main`);
-    }
-    if (!/if:\s*steps\.changes\.outputs\.changed\s*==\s*'true'/i.test(text)) {
-      failures.push(`${file}: dependency automation must skip branch and PR writes when nothing changed`);
-    }
-  }
-  if (/VITE_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.SSAI_PROD_SUPABASE_ANON_KEY\s*\}\}/.test(text) === false) {
-    failures.push(`${file}: workflow must provide VITE_SUPABASE_ANON_KEY from production secrets`);
-  }
-  if (/VITE_SUPABASE_URL:\s*\$\{\{\s*secrets\.SSAI_PROD_SUPABASE_URL\s*\}\}/.test(text) === false) {
-    failures.push(`${file}: workflow must provide VITE_SUPABASE_URL from production secrets`);
-  }
+}
+
+function requireMatch(file, text, pattern, reason) {
+  if (!pattern.test(text)) failures.push(`${file}: ${reason}`);
+}
+
+function forbid(file, text, pattern, reason) {
+  if (pattern.test(text)) failures.push(`${file}: ${reason}`);
 }
