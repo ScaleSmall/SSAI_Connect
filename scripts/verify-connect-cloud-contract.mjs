@@ -25,6 +25,7 @@ const connectStyles = await load('src/components/shared/connect.css');
 const icons = await load('src/lib/icons.js');
 const oauthComplete = await load('src/OAuthCompletePage.jsx');
 const oauthFlow = await load('src/oauthFlow.js');
+const tiktokDirectPost = await load('src/tiktokDirectPost.js');
 const supabaseConfig = await load('src/supabase.js');
 const packageSource = await load('package.json');
 const envVerifier = await load('scripts/verify-connect-env.mjs');
@@ -92,6 +93,21 @@ includesAll(connectPanel, [
   'Publishing platforms ready',
   "window.open('about:blank'",
   'popup.opener = null',
+  'verifyTikTokCreator',
+  'buildTikTokCreatorInfoRequest(verificationClientId)',
+  'buildTikTokCreatorInfoUrl(base)',
+  'abortable(authHeaders(), controller.signal)',
+  'clientIdRef.current !== verificationClientId',
+  'details.tiktok_creator_info_supported === true',
+  'validateOAuthAuthorizationUrl(data.auth_url, requestedPlatform)',
+  'connectorAuthorizationMode(conn)',
+  "authorizationMode === 'oauth'",
+  'Connection method unavailable',
+  "headers: { ...headers, Accept: 'application/json' }",
+  "TikTok connected. Verify the creator account below before hosted publishing UAT.",
+  'Direct Post account check',
+  'Verify account',
+  'This read-only check does not enable Direct Post or publish content.',
   '{showSocialPlatforms && (',
   '{showPhotoFeedSources && (',
   '{showCustomerDataSources && (',
@@ -100,7 +116,12 @@ includesAll(connectPanel, [
 excludesAll(connectPanel, [
   'Instagram shares the Facebook auth path',
   'Save and exit',
-], 'SSAI_Connect finish button copy contract');
+  'buildFrozenTikTokOAuthStartUrl',
+  "window.addEventListener('message'",
+  'direct_publish_enabled',
+  'TIKTOK_AUDITED_DIRECT_POST_CLIENT',
+  "operation: 'publish'",
+], 'SSAI_Connect client boundary contract');
 
 includesAll(connectPanel, [
   'BRAND_ICON_STYLE',
@@ -128,30 +149,39 @@ includesAll(oauthComplete, [
   "BroadcastChannel",
   "parseOAuthCompletion",
   "completion.message",
-  "parseFrozenTikTokCompletion",
-  "else if (frozenTikTokCompletion && window.opener)",
-  "window.opener.postMessage(frozenTikTokCompletion.message, window.location.origin)",
   "window.close()",
   '[OAuthCompletePage] OAuth completion relay was unavailable',
 ], 'SSAI_Connect OAuth completion contract');
 
 excludesAll(oauthComplete, [
   'catch {}',
+  'window.opener',
+  'postMessage(frozenTikTokCompletion',
 ], 'SSAI_Connect observable OAuth completion failure contract');
 
 assert.equal(
   (oauthComplete.match(/window\.opener/g) ?? []).length,
-  2,
-  'SSAI_Connect opener relay must remain limited to the frozen TikTok compatibility path',
+  0,
+  'SSAI_Connect OAuth completion must not depend on a popup opener',
 );
 
 includesAll(oauthFlow, [
   'isValidOAuthRequestId',
   'buildOAuthStartUrl',
-  'buildFrozenTikTokOAuthStartUrl',
+  'isCurrentOAuthRequest',
   'parseOAuthCompletion',
-  'parseFrozenTikTokCompletion',
   'isTrustedOAuthRelayMessage',
+  'tiktok:',
+  "hostname: 'app.companycam.com'",
+  "hostname: 'api.getjobber.com'",
+  "hostname: 'www.dropbox.com'",
+  "hostname: 'accounts.google.com'",
+  "hostname: 'app.hubspot.com'",
+  "hostname: 'marketplace.leadconnectorhq.com'",
+  "hostname: 'login.salesforce.com'",
+  "hostname: 'test.salesforce.com'",
+  'new Set(Object.keys(OAUTH_AUTHORIZATION_TARGETS))',
+  'targets.some(target => url.hostname === target.hostname && target.pathname.test(url.pathname))',
   'Unsupported OAuth platform',
   'OAuth API must use HTTPS',
   "type: 'oauth-success'",
@@ -161,7 +191,27 @@ includesAll(oauthFlow, [
 excludesAll(oauthFlow, [
   "params.get('oauth_error') ||",
   'error: params.get',
+  'FrozenTikTok',
+  "platform === 'gbp' ? 'google'",
 ], 'SSAI_Connect raw OAuth error disclosure contract');
+
+includesAll(tiktokDirectPost, [
+  "new URL('/functions/v1/tiktok-post', base.origin)",
+  "operation: 'creator_info'",
+  'readBoundedJsonResponse',
+  'parseTikTokCreatorInfoResponse',
+  'privacy_level_options',
+  'max_video_post_duration_sec',
+  "url.protocol === 'https:'",
+], 'SSAI_Connect TikTok creator verification contract');
+
+excludesAll(tiktokDirectPost, [
+  'direct_publish_enabled',
+  'TIKTOK_AUDITED_DIRECT_POST_CLIENT',
+  'TIKTOK_DIRECT_POST_UAT_CLIENT_IDS',
+  'TIKTOK_DIRECT_POST_CLIENT_KEY',
+  "operation: 'publish'",
+], 'SSAI_Connect TikTok gate isolation contract');
 
 includesAll(supabaseConfig, [
   'import.meta.env.VITE_SUPABASE_URL',
