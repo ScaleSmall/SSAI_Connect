@@ -1,160 +1,18 @@
-name: Update shared package
+name: Retired legacy Shared package consumer
 
 on:
-  repository_dispatch:
-    types: [shared-updated]
+  workflow_dispatch:
 
-concurrency:
-  group: update-shared
-  cancel-in-progress: true
-
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  update:
+  retired:
+    name: Legacy consumer remains disabled and inert
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      VITE_SUPABASE_URL: ${{ secrets.SSAI_PROD_SUPABASE_URL }}
-      VITE_SUPABASE_ANON_KEY: ${{ secrets.SSAI_PROD_SUPABASE_ANON_KEY }}
+    timeout-minutes: 1
     steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
-        with:
-          token: ${{ github.token }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: '24'
-
-      - name: Validate required secrets
-        env:
-          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
+      - name: Explain retirement
         run: |
-          set -euo pipefail
-          for name in SCALESMALL_PAT VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::Missing required secret-backed env $name"
-              exit 1
-            fi
-            if [[ "${!name}" =~ (your-|replace-with|example|changeme|placeholder) ]]; then
-              echo "::error::$name must be a real value"
-              exit 1
-            fi
-          done
-
-      - name: Prepare the single automation branch
-        id: branch
-        env:
-          GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}
-        run: |
-          set -euo pipefail
-          branch="automation/update-shared"
-          gh auth setup-git
-          git fetch --no-tags origin main
-          remote_branch_sha="$(
-            git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}'
-          )"
-          echo "remote_branch_sha=$remote_branch_sha" >> "$GITHUB_OUTPUT"
-          if [ -n "$remote_branch_sha" ]; then
-            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
-            git switch --create "$branch" --track "origin/$branch"
-            git rebase origin/main
-          else
-            git switch --create "$branch" origin/main
-          fi
-
-      - name: Configure git auth for private packages
-        env:
-          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
-        run: git config --global url."https://${SCALESMALL_PAT}@github.com/".insteadOf "https://github.com/"
-
-      - name: Update ssai-shared to latest
-        run: npm install github:ScaleSmall/SSAI_Shared --save
-
-      - name: Remove private package Git authentication
-        if: always()
-        env:
-          SCALESMALL_PAT: ${{ secrets.SCALESMALL_PAT }}
-        run: git config --global --unset-all url."https://${SCALESMALL_PAT}@github.com/".insteadOf || true
-
-      - name: Commit shared package pointer if changed
-        id: changes
-        run: |
-          set -euo pipefail
-          git config user.name "ScaleSmall Bot"
-          git config user.email "admin@scalesmall.ai"
-          git add package.json package-lock.json
-          if git diff --cached --quiet; then
-            if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-              echo "needs_commit=false" >> "$GITHUB_OUTPUT"
-              echo "The bounded automation branch already contains an unmerged update."
-            else
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-              echo "needs_commit=false" >> "$GITHUB_OUTPUT"
-              echo "No shared package update is required."
-            fi
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "needs_commit=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Commit shared package pointer locally
-        if: steps.changes.outputs.needs_commit == 'true'
-        run: |
-          set -euo pipefail
-          git commit -m "chore: update ssai-shared dependency"
-
-      - name: Validate production readiness
-        run: npm run check
-
-      - name: Rebase on the latest protected main
-        if: steps.changes.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          git rebase origin/main
-          npm run check
-
-      - name: Push an automation branch and open a protected pull request
-        if: steps.changes.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.SCALESMALL_PAT }}
-          REMOTE_BRANCH_SHA: ${{ steps.branch.outputs.remote_branch_sha }}
-        run: |
-          set -euo pipefail
-          branch="automation/update-shared"
-          if [ -n "$REMOTE_BRANCH_SHA" ]; then
-            if [[ ! "$REMOTE_BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::The fetched automation branch SHA is malformed."
-              exit 1
-            fi
-            git push \
-              --force-with-lease="refs/heads/$branch:$REMOTE_BRANCH_SHA" \
-              --set-upstream \
-              origin \
-              "HEAD:refs/heads/$branch"
-          else
-            git push --set-upstream origin "HEAD:refs/heads/$branch"
-          fi
-          existing_pr="$(
-            gh pr list \
-              --base main \
-              --head "${GITHUB_REPOSITORY_OWNER}:$branch" \
-              --state open \
-              --json url \
-              --jq '.[0].url // empty'
-          )"
-          if [ -n "$existing_pr" ]; then
-            echo "Updated existing protected pull request: $existing_pr"
-          else
-            gh pr create \
-              --base main \
-              --head "$branch" \
-              --title "chore: update ssai-shared dependency" \
-              --body "Automated dependency update from SSAI_Shared dispatch. This pull request must pass the normal protected-main checks and review before merge."
-          fi
+          echo "This legacy workflow identity is retired."
+          echo "Use Pull Shared with protected local evidence."
