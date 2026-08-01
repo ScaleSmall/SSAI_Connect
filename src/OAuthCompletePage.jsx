@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { oauthRelayChannelName, parseFrozenTikTokCompletion, parseOAuthCompletion } from './oauthFlow';
+import { oauthRelayChannelName, parseOAuthCompletion } from './oauthFlow';
 
 export default function OAuthCompletePage() {
   const [platform, setPlatform] = useState('');
@@ -7,27 +7,20 @@ export default function OAuthCompletePage() {
 
   useEffect(() => {
     const completion = parseOAuthCompletion(window.location.search, window.location.origin);
-    const frozenTikTokCompletion = completion ? null : parseFrozenTikTokCompletion(window.location.search);
     const requestId = completion?.requestId || '';
 
-    setPlatform(completion?.platform || frozenTikTokCompletion?.platform || '');
-    if (completion?.failed || frozenTikTokCompletion?.failed) {
-      setErrorMsg(frozenTikTokCompletion?.message?.error || 'Connection could not be completed. Please try again.');
+    setPlatform(completion?.platform || '');
+    if (!completion || completion.failed) {
+      setErrorMsg('Connection could not be completed. Please try again.');
     }
 
-    if (requestId && typeof BroadcastChannel !== 'undefined') {
+    if (completion && requestId && typeof BroadcastChannel !== 'undefined') {
       try {
         const channel = new BroadcastChannel(oauthRelayChannelName(requestId));
         channel.postMessage(completion.message);
         channel.close();
       } catch {
         console.warn('[OAuthCompletePage] OAuth completion relay was unavailable');
-      }
-    } else if (frozenTikTokCompletion && window.opener) {
-      try {
-        window.opener.postMessage(frozenTikTokCompletion.message, window.location.origin);
-      } catch {
-        console.warn('[OAuthCompletePage] TikTok completion relay was unavailable');
       }
     }
 

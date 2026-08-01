@@ -1,7 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { BRAND_ICON_STYLE, iconFor } from '../../lib/icons';
-import { buildFrozenTikTokOAuthStartUrl, buildOAuthStartUrl, isTrustedOAuthRelayMessage, oauthRelayChannelName } from '../../oauthFlow';
+import {
+  abortable,
+  buildOAuthStartUrl,
+  closeOwnedOAuthPopup,
+  isCurrentClientOperation,
+  isCurrentOAuthRequest,
+  isTrustedOAuthRelayMessage,
+  oauthRelayChannelName,
+  validateOAuthAuthorizationUrl,
+} from '../../oauthFlow';
+import {
+  buildTikTokCreatorInfoRequest,
+  buildTikTokCreatorInfoUrl,
+  formatTikTokPrivacyLevel,
+  parseTikTokCreatorInfoResponse,
+  readBoundedJsonResponse,
+} from '../../tiktokDirectPost';
+import {
+  ConnectedPlatformActions,
+  PageAccessModal,
+  connectorAuthorizationMode,
+} from './connectPanelInteractions';
 import './connect.css';
 import './connect-flow.css';
 
@@ -106,38 +127,14 @@ function linkedInOrgLabel(org, index) {
   return name || `Company page ${index + 1}`;
 }
 
-function PageAccessModal({ onClose }) {
-  return (
-    <div className="sc-modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="sc-modal" role="dialog" aria-modal="true" aria-labelledby="sc-page-access-title" onClick={event => event.stopPropagation()}>
-        <div className="sc-modal-head">
-          <h3 id="sc-page-access-title">Facebook and LinkedIn page access</h3>
-          <button type="button" className="sc-modal-close" onClick={onClose} aria-label="Close page access help">Close</button>
-        </div>
-        <p>
-          Use two logins in the right places. Your Scale Small AI login gets you into the dashboard or connect page.
-          The Facebook or LinkedIn login in the popup must be the account that has admin access to the business page.
-        </p>
-        <div className="sc-flow" aria-label="Connection flow">
-          <div className="sc-flow-step"><strong>1. Browser profile</strong><span>Open an incognito window or Chrome profile where the Facebook or LinkedIn account with page admin access is signed in.</span></div>
-          <div className="sc-flow-step"><strong>2. Scale Small AI login</strong><span>Go to dashboard.scalesmall.ai or connect.scalesmall.ai and sign in with the normal client dashboard login.</span></div>
-          <div className="sc-flow-step"><strong>3. Connect Platforms</strong><span>Click Connect for Facebook or LinkedIn.</span></div>
-          <div className="sc-flow-step"><strong>4. Platform popup</strong><span>When Facebook or LinkedIn opens, continue with the personal or admin account that manages the business/company page.</span></div>
-          <div className="sc-flow-step"><strong>5. Choose the page</strong><span>If asked, select the business page or company page, approve access, and return to Scale Small AI.</span></div>
-        </div>
-        <p className="sc-modal-note">
-          Important: the personal Facebook or LinkedIn account is not your Scale Small AI login. It is only used inside the platform popup so Facebook or LinkedIn can show the pages that account manages.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [], getToken, className = '', focusPlatforms = [] }) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [popupError, setPopupError] = useState(null);
   const [popupSuccess, setPopupSuccess] = useState(null);
+  const [tiktokCreatorInfo, setTikTokCreatorInfo] = useState(null);
+  const [tiktokCreatorBusy, setTikTokCreatorBusy] = useState(false);
+  const [tiktokCreatorError, setTikTokCreatorError] = useState(null);
   const [disconnectingKey, setDisconnectingKey] = useState(null);
   const errorRef = React.useRef(null);
   const [platformMap, setPlatformMap] = useState({});
@@ -166,12 +163,19 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const [connectFlowError, setConnectFlowError] = useState(null);
   const [connectFlowSaved, setConnectFlowSaved] = useState(null);
   const [customerRecordCount, setCustomerRecordCount] = useState(0);
+  const pageAccessTriggerRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
   const photoFileInputRef = React.useRef(null);
   const popupRef = React.useRef(null);
   const popupRequestRef = React.useRef(null);
   const popupChannelRef = React.useRef(null);
   const popupCloseTimerRef = React.useRef(null);
+  const popupRelayTimeoutRef = React.useRef(null);
+  const popupStartControllerRef = React.useRef(null);
+  const popupStartTimeoutRef = React.useRef(null);
+  const clientIdRef = React.useRef(clientId);
+  const tiktokVerificationRef = React.useRef({ sequence: 0, controller: null, clientId: null });
+  clientIdRef.current = clientId;
 
   const base = supabaseUrl || SUPABASE_URL;
   const serviceSet = useMemo(() => new Set(services || []), [services]);
@@ -192,10 +196,24 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   const selectedPlatformSet = useMemo(() => new Set(selectedPlatforms || []), [selectedPlatforms]);
   const refresh = useCallback(() => setRefreshTick(t => t + 1), []);
 
-  const clearPopupRelay = useCallback(() => {
+  const clearPopupRelay = useCallback((expectedRequestId = null) => {
+    if (!closeOwnedOAuthPopup(popupRef.current, {
+      currentRequestId: popupRequestRef.current,
+      expectedRequestId,
+    })) return false;
+    popupStartControllerRef.current?.abort();
+    popupStartControllerRef.current = null;
+    if (popupStartTimeoutRef.current) {
+      clearTimeout(popupStartTimeoutRef.current);
+      popupStartTimeoutRef.current = null;
+    }
     if (popupCloseTimerRef.current) {
       clearInterval(popupCloseTimerRef.current);
       popupCloseTimerRef.current = null;
+    }
+    if (popupRelayTimeoutRef.current) {
+      clearTimeout(popupRelayTimeoutRef.current);
+      popupRelayTimeoutRef.current = null;
     }
     if (popupChannelRef.current) {
       popupChannelRef.current.close();
@@ -203,6 +221,14 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     }
     popupRequestRef.current = null;
     popupRef.current = null;
+    return true;
+  }, []);
+
+  const cancelTikTokCreatorVerification = useCallback(() => {
+    const current = tiktokVerificationRef.current;
+    current.controller?.abort();
+    tiktokVerificationRef.current = { sequence: current.sequence + 1, controller: null, clientId: null };
+    setTikTokCreatorBusy(false);
   }, []);
 
   const authHeaders = useCallback(async () => {
@@ -262,61 +288,38 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
   useEffect(() => { fetchStatuses(); }, [fetchStatuses, refreshTick]);
 
   useEffect(() => {
-    const onFrozenTikTokMessage = (event) => {
-      if (event.origin !== window.location.origin || event.data?.platform !== 'tiktok') return;
-      if (event.data?.type === 'oauth-success') {
-        setPopupError(null);
-        refresh();
-      } else if (event.data?.type === 'oauth-error') {
-        setPopupError('Failed to connect tiktok. Please try again.');
-      }
-    };
-    window.addEventListener('message', onFrozenTikTokMessage);
-    return () => window.removeEventListener('message', onFrozenTikTokMessage);
-  }, [refresh]);
+    const status = platformMap.tiktok;
+    if (status?.connected === true && status?.is_expired !== true && status?.details?.direct_ready === true
+      && status?.details?.tiktok_creator_info_supported === true) return;
+    cancelTikTokCreatorVerification();
+    setTikTokCreatorInfo(null);
+    setTikTokCreatorError(null);
+  }, [cancelTikTokCreatorVerification, platformMap]);
+
+  useEffect(() => {
+    cancelTikTokCreatorVerification();
+    setTikTokCreatorInfo(null);
+    setTikTokCreatorError(null);
+  }, [cancelTikTokCreatorVerification, clientId]);
 
   useEffect(() => () => clearPopupRelay(), [clearPopupRelay]);
+  useEffect(() => () => {
+    const current = tiktokVerificationRef.current;
+    current.controller?.abort();
+    tiktokVerificationRef.current = { sequence: current.sequence + 1, controller: null, clientId: null };
+  }, []);
 
   const openPopup = useCallback(async (requestedPlatform) => {
     if (!clientId) return;
-    if (requestedPlatform === 'tiktok') {
-      setBusy(true);
-      setPopupError(null);
-      const popup = window.open('', 'oauth_popup', 'popup,width=600,height=700,noopener=no');
-      if (!popup) {
-        setPopupError('Popup blocked. Please allow popups for this site and try again.');
-        setBusy(false);
-        return;
-      }
-      try {
-        const headers = await authHeaders();
-        const url = buildFrozenTikTokOAuthStartUrl({
-          baseUrl: base,
-          clientId,
-          origin: window.location.origin,
-        });
-        const res = await fetch(url, { headers: { ...headers, Accept: 'application/json' } });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.auth_url) throw new Error(data.error || `Could not start OAuth (${res.status})`);
-        popup.location.href = data.auth_url;
-        const timer = setInterval(() => {
-          if (popup.closed) {
-            clearInterval(timer);
-            refresh();
-          }
-        }, 800);
-        setTimeout(() => clearInterval(timer), 5 * 60 * 1000);
-      } catch (err) {
-        popup.close();
-        setPopupError(err.message);
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
     clearPopupRelay();
     setBusy(true);
     setPopupError(null);
+    setPopupSuccess(null);
+    if (requestedPlatform === 'tiktok') {
+      cancelTikTokCreatorVerification();
+      setTikTokCreatorInfo(null);
+      setTikTokCreatorError(null);
+    }
     const requestId = crypto.randomUUID();
     const popup = window.open('about:blank', `oauth_popup_${requestId}`, 'popup,width=600,height=700');
     if (!popup) {
@@ -327,24 +330,35 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     popup.opener = null;
     popupRef.current = popup;
     popupRequestRef.current = requestId;
+    const startController = new AbortController();
+    popupStartControllerRef.current = startController;
+    const startTimeout = setTimeout(() => startController.abort(), 15_000);
+    popupStartTimeoutRef.current = startTimeout;
     try {
       if (typeof BroadcastChannel !== 'undefined') {
         const channel = new BroadcastChannel(oauthRelayChannelName(requestId));
         channel.onmessage = (event) => {
           const payload = event?.data;
-          if (popupRequestRef.current !== requestId) return;
-          if (!isTrustedOAuthRelayMessage(payload, { requestId, origin: window.location.origin })) return;
+          if (!isCurrentOAuthRequest(popupRequestRef.current, requestId)) return;
+          if (!isTrustedOAuthRelayMessage(payload, {
+            requestId,
+            origin: window.location.origin,
+            expectedPlatform: requestedPlatform,
+          })) return;
           if (payload.type === 'oauth-success') {
             setPopupError(null);
+            if (payload.platform === 'tiktok') {
+              setPopupSuccess('TikTok connected. Verify the creator account below before hosted publishing UAT.');
+            }
             refresh();
           } else if (payload.type === 'oauth-error') {
             setPopupError(`Failed to connect ${payload.platform || 'platform'}. Please try again.`);
           }
-          clearPopupRelay();
+          clearPopupRelay(requestId);
         };
         popupChannelRef.current = channel;
       }
-      const headers = await authHeaders();
+      const headers = await abortable(authHeaders(), startController.signal);
       const url = buildOAuthStartUrl({
         baseUrl: base,
         requestedPlatform,
@@ -352,35 +366,109 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
         origin: window.location.origin,
         requestId,
       });
-      const res = await fetch(url, { headers: { ...headers, Accept: 'application/json' } });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.auth_url) throw new Error(data.error || `Could not start OAuth (${res.status})`);
-      popup.location.href = data.auth_url;
-      popupCloseTimerRef.current = setInterval(() => {
+      const res = await fetch(url, {
+        headers: { ...headers, Accept: 'application/json' },
+        signal: startController.signal,
+      });
+      const data = await readBoundedJsonResponse(res);
+      if (!res.ok || !data.auth_url) throw new Error(`Could not start OAuth (${res.status})`);
+      popup.location.href = validateOAuthAuthorizationUrl(data.auth_url, requestedPlatform);
+      const closeTimer = setInterval(() => {
+        if (!isCurrentOAuthRequest(popupRequestRef.current, requestId) || popupRef.current !== popup) {
+          clearInterval(closeTimer);
+          return;
+        }
         if (!popup.closed) return;
-        clearPopupRelay();
+        clearPopupRelay(requestId);
         refresh();
       }, 800);
-      setTimeout(() => {
-        if (popupCloseTimerRef.current) {
-          clearInterval(popupCloseTimerRef.current);
-          popupCloseTimerRef.current = null;
-        }
+      popupCloseTimerRef.current = closeTimer;
+      const relayTimeout = setTimeout(() => {
+        if (!isCurrentOAuthRequest(popupRequestRef.current, requestId) || popupRef.current !== popup
+          || popupCloseTimerRef.current !== closeTimer) return;
+        clearPopupRelay(requestId);
+        setPopupError('Connection window timed out. Please try again.');
       }, 5 * 60 * 1000);
+      popupRelayTimeoutRef.current = relayTimeout;
     } catch (err) {
-      popup.close();
-      clearPopupRelay();
-      setPopupError(err.message);
+      if (clearPopupRelay(requestId)) {
+        setPopupError(err?.name === 'AbortError' ? 'Connection request timed out. Please try again.' : err.message);
+        setBusy(false);
+      }
     } finally {
-      setBusy(false);
+      clearTimeout(startTimeout);
+      if (popupStartTimeoutRef.current === startTimeout) popupStartTimeoutRef.current = null;
+      if (popupStartControllerRef.current === startController) popupStartControllerRef.current = null;
+      if (isCurrentOAuthRequest(popupRequestRef.current, requestId)) setBusy(false);
     }
-  }, [authHeaders, base, clearPopupRelay, clientId, refresh]);
+  }, [authHeaders, base, cancelTikTokCreatorVerification, clearPopupRelay, clientId, refresh]);
+
+  const verifyTikTokCreator = useCallback(async () => {
+    if (!clientId) return;
+    const sequence = tiktokVerificationRef.current.sequence + 1;
+    const verificationClientId = clientId;
+    tiktokVerificationRef.current.controller?.abort();
+    const controller = new AbortController();
+    tiktokVerificationRef.current = { sequence, controller, clientId: verificationClientId };
+
+    setTikTokCreatorBusy(true);
+    setTikTokCreatorError(null);
+    setTikTokCreatorInfo(null);
+
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const headers = await abortable(authHeaders(), controller.signal);
+      if (!headers.Authorization) {
+        const error = new Error('TikTok creator verification requires an authenticated session');
+        error.code = 'SESSION_REQUIRED';
+        throw error;
+      }
+
+      const response = await fetch(buildTikTokCreatorInfoUrl(base), {
+        method: 'POST',
+        headers: { ...headers, Accept: 'application/json' },
+        body: JSON.stringify(buildTikTokCreatorInfoRequest(verificationClientId)),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        await readBoundedJsonResponse(response).catch(() => null);
+        const error = new Error('TikTok creator verification request failed');
+        error.code = response.status === 401 || response.status === 403 ? 'SESSION_REQUIRED' : 'VERIFICATION_FAILED';
+        throw error;
+      }
+
+      const payload = await readBoundedJsonResponse(response);
+      if (!isCurrentClientOperation(tiktokVerificationRef.current, sequence, verificationClientId)
+        || clientIdRef.current !== verificationClientId) return;
+      setTikTokCreatorInfo(parseTikTokCreatorInfoResponse(payload));
+    } catch (error) {
+      if (!isCurrentClientOperation(tiktokVerificationRef.current, sequence, verificationClientId)
+        || clientIdRef.current !== verificationClientId) return;
+      console.warn('[ConnectPanel] TikTok creator verification failed', { name: error?.name || 'Error' });
+      if (error?.name === 'AbortError') {
+        setTikTokCreatorError('TikTok account verification timed out. Please retry.');
+      } else if (error?.code === 'SESSION_REQUIRED') {
+        setTikTokCreatorError('Your session cannot verify this TikTok account. Sign in again, reconnect TikTok, and retry.');
+      } else {
+        setTikTokCreatorError('Could not verify the connected TikTok creator. Reconnect TikTok and retry.');
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (isCurrentClientOperation(tiktokVerificationRef.current, sequence, verificationClientId)
+        && clientIdRef.current === verificationClientId) {
+        tiktokVerificationRef.current = { sequence, controller: null, clientId: verificationClientId };
+        setTikTokCreatorBusy(false);
+      }
+    }
+  }, [authHeaders, base, clientId]);
 
   const disconnectPlatform = useCallback(async (platform) => {
     try {
       setDisconnectingKey(platform);
       setPopupError(null);
       setPopupSuccess(null);
+      if (platform === 'tiktok') cancelTikTokCreatorVerification();
       const headers = await authHeaders();
       const res = await fetch(`${base}/functions/v1/oauth-status`, {
         method: 'POST',
@@ -389,6 +477,10 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Failed to disconnect (${res.status})`);
+      if (platform === 'tiktok') {
+        setTikTokCreatorInfo(null);
+        setTikTokCreatorError(null);
+      }
       setPopupSuccess(`${platform} disconnected successfully.`);
       setTimeout(() => setPopupSuccess(null), 3000);
       refresh();
@@ -398,7 +490,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     } finally {
       setDisconnectingKey(null);
     }
-  }, [clientId, base, authHeaders, refresh]);
+  }, [clientId, base, authHeaders, cancelTikTokCreatorVerification, refresh]);
 
   const togglePlatformUse = useCallback(async (platform, selected) => {
     const nextAction = selected ? 'remove_platform' : 'add_platform';
@@ -439,26 +531,6 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       setPlatformSelectionBusy(null);
     }
   }, [authHeaders, base, clientId, platformSelectionProductLabel, refresh, selectedPlatforms.length]);
-
-  const connectSimple = useCallback(async (connectorType) => {
-    setTokenBusy(b => ({ ...b, [connectorType]: true }));
-    setTokenErrors(e => ({ ...e, [connectorType]: null }));
-    try {
-      const headers = await authHeaders();
-      const res = await fetch(`${base}/functions/v1/connect-connector`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ client_id: clientId, connector_type: connectorType }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.error) throw new Error(data.error || 'Failed to connect');
-      refresh();
-    } catch (err) {
-      setTokenErrors(e => ({ ...e, [connectorType]: err.message }));
-    } finally {
-      setTokenBusy(b => ({ ...b, [connectorType]: false }));
-    }
-  }, [clientId, base, authHeaders, refresh]);
 
   const connectApiKey = useCallback(async (connectorType) => {
     const token = (tokenInputs[connectorType] || '').trim();
@@ -558,7 +630,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
       setManualUploadBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  }, [clientId, base, getToken]);
+  }, [clientId, base, getToken, refresh]);
 
   const handlePhotoUpload = useCallback(async (e) => {
     const files = Array.from(e.target.files || []);
@@ -589,35 +661,44 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     }
   }, [clientId, base, getToken, refresh]);
 
-  const embedCode = `<script src="${base}/functions/v1/widget-gallery?format=js" data-client="${clientId}" data-render="auto" data-modules="beacon,gallery,articles"><\/script>`;
+  const embedCode = `<script src="${base}/functions/v1/widget-gallery?format=js" data-client="${clientId}" data-render="auto" data-modules="beacon,gallery,articles"></script>`;
   const copyEmbed = useCallback(() => {
     navigator.clipboard.writeText(embedCode);
     setEmbedCopied(true);
     setTimeout(() => setEmbedCopied(false), 2500);
   }, [embedCode]);
 
-  const selectedSocialRows = SOCIAL_PLATFORMS
-    .filter(platform => selectedPlatformSet.has(platform.platform))
-    .map(platform => ({ ...platform, status: platformMap[platform.platform] }));
-  const missingSelectedPlatforms = selectedSocialRows
-    .filter(platform => {
-      const status = platform.status;
-      if (!status?.connected || status?.is_expired) return true;
-      const details = status.details || {};
-      return Boolean(
-        details.needs_page_selection ||
-        details.needs_org_selection ||
-        details.needs_confirmation ||
-        details.needs_business_account ||
-        details.needs_refresh ||
-        details.needs_open_id
-      );
-    })
-    .map(platform => platform.label);
-  const contentEngineMissingSelectedPlatforms = selectedSocialRows
-    .filter(platform => CONTENT_ENGINE_SOCIAL_PLATFORM_SET.has(platform.platform))
-    .filter(platform => missingSelectedPlatforms.includes(platform.label))
-    .map(platform => platform.label);
+  const selectedSocialRows = useMemo(
+    () => SOCIAL_PLATFORMS
+      .filter(platform => selectedPlatformSet.has(platform.platform))
+      .map(platform => ({ ...platform, status: platformMap[platform.platform] })),
+    [platformMap, selectedPlatformSet],
+  );
+  const missingSelectedPlatforms = useMemo(
+    () => selectedSocialRows
+      .filter(platform => {
+        const status = platform.status;
+        if (!status?.connected || status?.is_expired) return true;
+        const details = status.details || {};
+        return Boolean(
+          details.needs_page_selection ||
+          details.needs_org_selection ||
+          details.needs_confirmation ||
+          details.needs_business_account ||
+          details.needs_refresh ||
+          details.needs_open_id
+        );
+      })
+      .map(platform => platform.label),
+    [selectedSocialRows],
+  );
+  const contentEngineMissingSelectedPlatforms = useMemo(
+    () => selectedSocialRows
+      .filter(platform => CONTENT_ENGINE_SOCIAL_PLATFORM_SET.has(platform.platform))
+      .filter(platform => missingSelectedPlatforms.includes(platform.label))
+      .map(platform => platform.label),
+    [missingSelectedPlatforms, selectedSocialRows],
+  );
   const photoSourceConnected = legacyPhotoSourceCount > 0 || allConnectors.some(connector => (
     connector?.is_active === true && PHOTO_SOURCE_CONNECTOR_TYPES.has(connector.connector_type)
   ));
@@ -635,11 +716,14 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
     ? SOCIAL_PLATFORMS.filter(platform => CONTENT_ENGINE_SOCIAL_PLATFORM_SET.has(platform.platform))
     : SOCIAL_PLATFORMS;
   const customerDataConnected = crmConnected || customerRecordCount > 0;
-  const gatedMissingSelectedPlatforms = powSetupRequired
-    ? missingSelectedPlatforms
-    : contentEngineSetupRequired
-      ? contentEngineMissingSelectedPlatforms
-      : [];
+  const gatedMissingSelectedPlatforms = useMemo(
+    () => powSetupRequired
+      ? missingSelectedPlatforms
+      : contentEngineSetupRequired
+        ? contentEngineMissingSelectedPlatforms
+        : [],
+    [contentEngineMissingSelectedPlatforms, contentEngineSetupRequired, missingSelectedPlatforms, powSetupRequired],
+  );
   const photoSourceReady = !photoSourceRequired || photoSourceConnected;
   const customerDataReady = !customerDataRequired || customerDataConnected;
   const connectFlowReady = gatedMissingSelectedPlatforms.length === 0 && photoSourceReady && customerDataReady;
@@ -730,9 +814,14 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
 
   return (
     <div className={`sc-panel ${className}`}>
-      {pageAccessInfoOpen && <PageAccessModal onClose={() => setPageAccessInfoOpen(false)} />}
-      {popupError && <div ref={errorRef} className="sc-error" style={{ marginBottom: 12 }}>{popupError}</div>}
-      {popupSuccess && <div className="sc-success" style={{ marginBottom: 12 }}>{popupSuccess}</div>}
+      {pageAccessInfoOpen && (
+        <PageAccessModal
+          onClose={() => setPageAccessInfoOpen(false)}
+          returnFocusRef={pageAccessTriggerRef}
+        />
+      )}
+      {popupError && <div ref={errorRef} className="sc-error" role="alert" style={{ marginBottom: 12 }}>{popupError}</div>}
+      {popupSuccess && <div className="sc-success" role="status" aria-live="polite" style={{ marginBottom: 12 }}>{popupSuccess}</div>}
       <div className="sc-status-bar">
         <div className="sc-stat"><span className="sc-dot sc-dot-green" />Connect apps and data sources for <strong>{businessName || 'this client'}</strong></div>
       </div>
@@ -756,7 +845,14 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           </div>
           <div className="sc-auth-reminder">
             <strong>Facebook & LinkedIn page access:</strong> Open <strong>dashboard.scalesmall.ai</strong> or <strong>connect.scalesmall.ai</strong> in an incognito window or Chrome profile where the page admin account is signed in. Then sign in to Scale Small AI with the normal dashboard login, click Connect, and use the Facebook or LinkedIn popup with the account that manages the business/company page.
-            <button type="button" className="sc-auth-info-button" onClick={() => setPageAccessInfoOpen(true)}>Click here for more info</button>
+            <button
+              ref={pageAccessTriggerRef}
+              type="button"
+              className="sc-auth-info-button"
+              onClick={() => setPageAccessInfoOpen(true)}
+            >
+              Click here for more info
+            </button>
           </div>
           {platformSelectionError && <div ref={errorRef} className="sc-row-error" style={{ marginBottom: 12 }}>{platformSelectionError}</div>}
           <div className="sc-list">
@@ -853,7 +949,15 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                         {embedVisible ? 'Hide code' : 'Get embed code'}
                       </button>
                     ) : connected ? (
-                      <button className="sc-btn sc-btn-ghost" onClick={() => disconnectPlatform(p.platform)} disabled={!!disconnectingKey || busy}>{disconnectingKey === p.platform ? 'Disconnecting…' : 'Disconnect'}</button>
+                      <ConnectedPlatformActions
+                        connected={connected}
+                        platform={p.platform}
+                        details={details}
+                        busy={busy}
+                        disconnectingKey={disconnectingKey}
+                        onOpenPopup={openPopup}
+                        onDisconnect={disconnectPlatform}
+                      />
                     ) : p.platform === 'linkedin' && Array.isArray(details.available_orgs) && details.available_orgs.length > 0 ? (
                       <button className="sc-btn sc-btn-ghost" onClick={() => openPopup(p.platform)} disabled={busy}>
                         Reconnect
@@ -874,6 +978,70 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                     <button className="sc-btn sc-btn-ghost sc-btn-xs" onClick={copyEmbed}>{embedCopied ? '✓ Copied' : 'Copy'}</button>
                   </div>
                 </div>
+              )}
+              {p.platform === 'tiktok' && connected && (
+                <section className={`sc-tiktok-readiness ${tiktokCreatorInfo ? 'is-verified' : ''}`} aria-label="TikTok Direct Post account check">
+                  <div className="sc-tiktok-readiness-head">
+                    <div>
+                      <strong>Direct Post account check</strong>
+                      <span>
+                        {details.direct_ready
+                          ? 'OAuth includes refresh access and the TikTok creator identifier.'
+                          : 'Reconnect TikTok to capture refresh access and the creator identifier.'}
+                      </span>
+                    </div>
+                    {details.direct_ready && details.tiktok_creator_info_supported === true && (
+                      <button
+                        type="button"
+                        className="sc-btn sc-btn-ghost"
+                        onClick={verifyTikTokCreator}
+                        disabled={tiktokCreatorBusy}
+                      >
+                        {tiktokCreatorBusy ? 'Verifying...' : tiktokCreatorInfo ? 'Refresh account check' : 'Verify account'}
+                      </button>
+                    )}
+                    {details.direct_ready && details.tiktok_creator_info_supported !== true && (
+                      <span className="sc-badge sc-badge-amber">Protected account check pending deployment</span>
+                    )}
+                  </div>
+                  {tiktokCreatorError && <div className="sc-row-error" role="alert">{tiktokCreatorError}</div>}
+                  {tiktokCreatorInfo && (
+                    <div className="sc-tiktok-creator" role="status" aria-live="polite">
+                      <div className="sc-tiktok-creator-account">
+                        <span className="sc-badge sc-badge-green">Creator verified</span>
+                        <strong>@{tiktokCreatorInfo.creatorUsername.replace(/^@/, '')}</strong>
+                        <span>{tiktokCreatorInfo.creatorNickname}</span>
+                      </div>
+                      <dl className="sc-tiktok-capabilities">
+                        <div>
+                          <dt>Video limit</dt>
+                          <dd>{tiktokCreatorInfo.maxVideoPostDurationSec} seconds</dd>
+                        </div>
+                        <div>
+                          <dt>Interactions available</dt>
+                          <dd>
+                            {[
+                              !tiktokCreatorInfo.commentDisabled && 'Comments',
+                              !tiktokCreatorInfo.duetDisabled && 'Duet',
+                              !tiktokCreatorInfo.stitchDisabled && 'Stitch',
+                            ].filter(Boolean).join(', ') || 'None reported by TikTok'}
+                          </dd>
+                        </div>
+                      </dl>
+                      <div className="sc-tiktok-privacy">
+                        <span>Privacy choices reported by TikTok</span>
+                        <div>
+                          {tiktokCreatorInfo.privacyLevelOptions.map(option => (
+                            <span key={option} className="sc-optional-badge">{formatTikTokPrivacyLevel(option)}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <p className="sc-tiktok-control-note">
+                    This read-only check does not enable Direct Post or publish content. Each post still requires current creator confirmation, consent, privacy and interaction choices, disclosures, and media validation.
+                  </p>
+                </section>
               )}
               {p.platform === 'facebook' && Array.isArray(details.available_pages) && details.available_pages.length > 1 && (
                 <div className="sc-token-row">
@@ -962,7 +1130,9 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           const isPending = conn?.status === 'pending_discovery';
           const isComingSoon = !isLiveSource || conn?.availability_status === 'coming_soon' || conn?.status === 'coming_soon';
           const isUnavailable = !isConfigured || isComingSoon;
-          const isApiKey = conn?.auth_type === 'api_key';
+          const authorizationMode = connectorAuthorizationMode(conn);
+          const isApiKey = authorizationMode === 'api_key';
+          const isOAuth = authorizationMode === 'oauth';
           const tokenVal = tokenInputs[s.source_type] || '';
           const tErr = tokenErrors[s.source_type];
           const tBusy = tokenBusy[s.source_type];
@@ -975,6 +1145,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           else if (isComingSoon) note = 'Coming soon';
           else if (isManualPhotoUpload) note = 'Upload JPG, PNG, or WebP job photos from this dashboard';
           else if (isApiKey && !isConnected) note = 'Paste your API token below to connect';
+          else if (!isConnected && !isOAuth) note = 'Connection method unavailable';
 
           return (
             <div key={s.source_type} className="sc-row">
@@ -1003,7 +1174,7 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                     </>
                   ) : isConnected ? (
                     <button className="sc-btn sc-btn-ghost" onClick={() => disconnectConnector(s.source_type)} disabled={!!disconnectingKey || busy}>{disconnectingKey === s.source_type ? 'Disconnecting…' : 'Disconnect'}</button>
-                  ) : !isUnavailable && !isPending && !isApiKey && (
+                  ) : !isUnavailable && !isPending && isOAuth && (
                     <button className="sc-btn sc-btn-primary" onClick={() => openPopup(s.source_type)} disabled={busy}>Connect</button>
                   )}
                 </div>
@@ -1056,19 +1227,23 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
           <div className="sc-list">
             {CRM_PLATFORMS.map(crm => {
           const conn = connectorMap[crm.connector_type];
+          const isConfigured = Boolean(conn);
           const isConnected = conn?.is_active === true;
           const isComingSoon = conn?.availability_status === 'coming_soon' || conn?.status === 'coming_soon';
+          const isOAuth = connectorAuthorizationMode(conn) === 'oauth';
           const isPending = conn?.designator_discovery_status === 'pending' || conn?.status === 'pending_discovery';
           const isFailed = conn?.designator_discovery_status === 'failed';
           const configNote = conn?.config;
 
           let note = null;
-          if (isComingSoon) note = 'Coming soon';
+          if (!isConfigured) note = 'Not available yet';
+          else if (isComingSoon) note = 'Coming soon';
           else if (isPending) note = 'Verifying connection…';
           else if (isFailed) note = 'Setup required — check connection';
           else if (isConnected && configNote?.hub_domain) note = configNote.hub_domain;
           else if (isConnected && configNote?.org_name) note = configNote.org_name;
           else if (isConnected && configNote?.location_id) note = `Location: ${configNote.location_id}`;
+          else if (!isConnected && !isOAuth) note = 'Connection method unavailable';
 
           return (
             <div key={crm.connector_type} className="sc-row">
@@ -1079,17 +1254,17 @@ export function ConnectPanel({ clientId, supabaseUrl, businessName, services = [
                   {note && <div className="sc-note">{note}</div>}
                 </div>
                 <div className="sc-actions">
-                  <RowBadge connected={isConnected} disabled={false} connStatus={isComingSoon ? 'coming_soon' : isPending ? 'pending_discovery' : isFailed ? 'needs_designator' : undefined} />
-                  {!isComingSoon && (
+                  <RowBadge connected={isConnected} disabled={false} connStatus={!isConfigured ? 'not_configured' : isComingSoon ? 'coming_soon' : isPending ? 'pending_discovery' : isFailed ? 'needs_designator' : undefined} />
+                  {isConfigured && !isComingSoon && (
                     isConnected ? (
                       <button className="sc-btn sc-btn-ghost" onClick={() => disconnectConnector(crm.connector_type)} disabled={!!disconnectingKey || busy}>
                         {disconnectingKey === crm.connector_type ? 'Disconnecting…' : 'Disconnect'}
                       </button>
-                    ) : (
+                    ) : isOAuth ? (
                       <button className="sc-btn sc-btn-primary" onClick={() => openPopup(crm.platform)} disabled={busy}>
                         {isFailed ? 'Reconnect' : 'Connect'}
                       </button>
-                    )
+                    ) : null
                   )}
                 </div>
               </div>
